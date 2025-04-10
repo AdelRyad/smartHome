@@ -146,7 +146,7 @@ export const LampLifeScreen = () => {
               readLampHours(
                 selectedSection.ip!,
                 502,
-                1, // Use lamp index 1 for the global setpoint
+                1,
                 msg => {
                   // Only log errors
                   if (msg.toLowerCase().includes('error')) {
@@ -170,7 +170,7 @@ export const LampLifeScreen = () => {
 
                     // Now fetch hours for remaining lamps (2-4)
                     // We'll proceed regardless of success/failure for these
-                    [2, 3, 4].forEach(lampIndex => {
+                    [1, 2, 3, 4].forEach(lampIndex => {
                       if (!isActive) return;
 
                       readLampHours(
