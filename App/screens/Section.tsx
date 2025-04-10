@@ -1,4 +1,4 @@
-import React, {useEffect, useState, useCallback, useRef} from 'react';
+import React, {useEffect, useState, useCallback} from 'react';
 import {View, Text, TouchableOpacity, StyleSheet, FlatList} from 'react-native';
 import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
@@ -55,14 +55,18 @@ export const Section = ({}) => {
   const [isPasswordRequired, setIsPasswordRequired] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
 
-  // Create a ref to store the fetchLampHours function
-  const fetchLampHoursRef = useRef<() => Promise<void>>();
-
   const handleKeyPress = (key: string | number) => {
     let newPassword = [...password];
 
     if (key === 'DEL') {
-      const lastFilledIndex = newPassword.findLastIndex(p => p !== '');
+      // Find the last non-empty index manually
+      let lastFilledIndex = -1;
+      for (let i = newPassword.length - 1; i >= 0; i--) {
+        if (newPassword[i] !== '') {
+          lastFilledIndex = i;
+          break;
+        }
+      }
       if (lastFilledIndex >= 0) {
         newPassword[lastFilledIndex] = '';
       }
@@ -101,117 +105,125 @@ export const Section = ({}) => {
     });
   }, [sectionId]);
 
-  const fetchLampHours = useCallback(async () => {
-    if (!devices || devices.length === 0 || !section.ip) {
-      return;
-    }
-
-    try {
-      // Create a new object to store updated lamp hours
-      const updatedLampHours = new Map();
-
-      // Use Promise.all to fetch lamp hours for each device concurrently
-      await Promise.all(
-        devices.map(async (device: {id: number; name: string}) => {
-          try {
-            // Skip devices with ID > 4 if needed
-            if (device.id > 4) {
-              console.log(`Skipping device ID ${device.id} (higher than 4)`);
-              return;
-            }
-
-            // Log the device we're fetching lamp hours for
-            console.log(
-              `Fetching lamp hours for device: ${device.name} (ID: ${device.id})`,
-            );
-
-            // Use device ID directly as lamp index
-            const lampIndex = device.id;
-
-            // Ensure section.ip is a string
-            const strSectionIp =
-              typeof section.ip === 'string'
-                ? section.ip
-                : section.ip.toString();
-            if (!strSectionIp) {
-              console.error('Invalid section.ip:', section.ip);
-              return;
-            }
-
-            // Call the function with the correct parameters
-            await readLampHours(
-              strSectionIp,
-              502, // Default port
-              lampIndex,
-              (msg: string) => {
-                // Handle status messages
-                console.log(`[Device ${device.id}] Status: ${msg}`);
-              },
-              (
-                lampIdx: number,
-                response: {current: number; max: number} | null,
-              ) => {
-                // Handle successful response
-                if (response) {
-                  console.log(`Lamp hours for Device ${device.id}:`, response);
-                  // Store lamp hours with device.id as key
-                  updatedLampHours.set(device.id, response);
-                } else {
-                  console.error(
-                    `No data received for lamp ${lampIdx} (Device ${device.id})`,
-                  );
-                  // Set default values when no data is received
-                  updatedLampHours.set(device.id, {current: 0, max: 8000});
-                }
-              },
-            );
-          } catch (error) {
-            console.error(`Error processing device ${device.id}:`, error);
-          }
-        }),
-      );
-
-      // Update the lamp hours state with all fetched values
-      setLampHours((prev: Record<number, LampHours>) => {
-        const newState = {...prev};
-        updatedLampHours.forEach((value, key) => {
-          newState[key] = value;
-        });
-        return newState;
-      });
-    } catch (error) {
-      console.error('Error fetching lamp hours:', error);
-    }
-  }, [devices, section.ip]);
-
-  // Store the fetchLampHours function in the ref
-  useEffect(() => {
-    fetchLampHoursRef.current = fetchLampHours;
-  }, [fetchLampHours]);
+  // Helper function for status logging
+  const logStatus = useCallback((message: string) => {
+    console.log(`[Section Screen Status] ${message}`);
+    setStatusMessage(message);
+    // Optionally clear message after delay
+    // setTimeout(() => setStatusMessage(''), isError ? 6000 : 4000);
+  }, []);
 
   useEffect(() => {
     if (section?.ip) {
-      // Add a flag to prevent multiple calls
-      let isFetching = false;
+      const modbus_ip = section.ip;
+      const modbus_port = 502;
+      let isActive = true;
 
-      getDevicesForSection(+section.id, fetchedDevices => {
-        setDevices(fetchedDevices);
-
-        // Only call fetchLampHours if not already fetching
-        if (!isFetching && fetchLampHoursRef.current) {
-          isFetching = true;
-          fetchLampHoursRef.current().finally(() => {
-            isFetching = false;
+      // Define fetchData INSIDE useEffect to access setLoading and logStatus
+      const fetchData = async () => {
+        try {
+          logStatus(`Fetching devices for ${section.name}...`);
+          const devicesFromDb = await new Promise<any[] | null>(resolve => {
+            getDevicesForSection(+section.id, resolve);
           });
+
+          if (!isActive || !devicesFromDb) {
+            setDevices([]);
+            return;
+          }
+          setDevices(devicesFromDb);
+          logStatus(
+            `Found ${devicesFromDb.length} devices. Reading lamp hours...`,
+          );
+
+          const updatedLampHours: {[key: number]: LampHours} = {};
+          let allLampsReadSuccessfully = true;
+          let globalMaxHours = 8000;
+
+          for (let i = 0; i < devicesFromDb.length; i++) {
+            const device = devicesFromDb[i];
+            const lampIndex = device.id;
+            if (lampIndex > 4) continue; // Skip devices > 4
+            if (!isActive) break;
+
+            try {
+              logStatus(`Reading lamp ${lampIndex} from ${modbus_ip}...`);
+              const result = await readLampHours(
+                modbus_ip,
+                modbus_port,
+                lampIndex,
+              );
+
+              if (isActive) {
+                logStatus(
+                  `Success reading Lamp ${lampIndex}: ${Math.floor(
+                    result.currentHours,
+                  )}/${Math.floor(result.maxHours)}`,
+                );
+                updatedLampHours[lampIndex] = {
+                  current: result.currentHours,
+                  max: result.maxHours,
+                };
+                if (lampIndex === 1) {
+                  globalMaxHours = result.maxHours; // Update fallback max
+                }
+              }
+            } catch (error: any) {
+              allLampsReadSuccessfully = false;
+              logStatus(
+                `Failed to read lamp ${lampIndex}: ${error.message || error}`,
+              );
+              if (isActive) {
+                updatedLampHours[lampIndex] = {current: 0, max: globalMaxHours}; // Use fallback
+              }
+            }
+
+            if (
+              isActive &&
+              i < devicesFromDb.length - 1 &&
+              devicesFromDb[i + 1]?.id <= 4
+            ) {
+              const delay = 2000; // 2 second delay
+              logStatus(
+                `Waiting ${delay / 1000}s before reading lamp ${
+                  devicesFromDb[i + 1]?.id
+                }...`,
+              );
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+          }
+
+          if (isActive) {
+            setLampHours(updatedLampHours);
+            logStatus(
+              allLampsReadSuccessfully
+                ? 'All lamp hours loaded.'
+                : 'Finished reading lamp hours, some failed.',
+            );
+          }
+        } catch (error: any) {
+          if (isActive) {
+            logStatus(`Error fetching data: ${error.message}`);
+            setDevices([]);
+            setLampHours({});
+          }
         }
-      });
+      }; // End of fetchData definition
+
+      fetchData();
+
+      return () => {
+        isActive = false;
+      };
     }
-  }, [section]); // No need to include fetchLampHours in dependency array
+  }, [section, logStatus]); // Add logStatus to dependencies
 
   const handleResetCleaningHours = () => {
-    setCleaningHours(section.ip, 502, 14, msg => {
+    // Assuming setCleaningHours uses a callback
+    setCleaningHours(section.ip, 502, 14, (msg: string) => {
       setStatusMessage(msg);
-      setSection(prev => ({
+      setSection((prev: any) => ({
+        // Added type for prev
         ...prev,
         cleaningDays: 14,
       }));
@@ -219,11 +231,11 @@ export const Section = ({}) => {
         section.id,
         section.name,
         section.ip,
-        0,
+        14, // Update cleaningDays in DB
         section.working,
-        success => {
+        (success: boolean) => {
           if (!success) {
-            console.error('Failed to update cleaning hours in DB');
+            logStatus('Failed to update cleaning hours in DB');
           }
         },
       );
@@ -233,8 +245,11 @@ export const Section = ({}) => {
 
   const handleResetLampLife = () => {
     selectedDevices.forEach((device: {id: number}) => {
-      setLampLife(section.ip, 502, device.id, 8000, msg => {
+      // Pass the status callback to setLampLife
+      setLampLife(section.ip, 502, 8000, (msg: string) => {
+        // Added type for msg
         setStatusMessage(msg);
+        // Update local state immediately
         setLampHours(prev => ({
           ...prev,
           [device.id]: {current: 0, max: prev[device.id]?.max || 8000},

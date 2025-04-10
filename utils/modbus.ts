@@ -83,79 +83,83 @@ const createModbusRequest = (
 };
 
 /**
- * Helper function to send a Modbus request, matching original structure.
+ * Helper function to send a Modbus request and return a Promise resolving with the response Buffer.
  * Includes basic timeout and exception handling.
  */
 const sendModbusRequest = (
   ip: string,
   port: number,
   request: Buffer,
-  callback: (response: Buffer) => void, // Success callback
-  setStatus: (msg: string) => void, // Status/Error callback
-) => {
-  const client = TcpSocket.createConnection({host: ip, port}, () => {
-    // setStatus(`Sending: ${request.toString('hex')}`);
-    // Use underlying ArrayBuffer for Uint8Array conversion
-    client.write(
-      new Uint8Array(request.buffer, request.byteOffset, request.byteLength),
-    );
-  });
+): Promise<Buffer> => {
+  return new Promise((resolve, reject) => {
+    const client = TcpSocket.createConnection({host: ip, port}, () => {
+      client.write(
+        new Uint8Array(request.buffer, request.byteOffset, request.byteLength),
+      );
+    });
 
-  let responseBuffer = Buffer.alloc(0);
-  let requestTimeout: NodeJS.Timeout | null = null;
+    let responseBuffer = Buffer.alloc(0);
+    let requestTimeout: NodeJS.Timeout | null = null;
 
-  const cleanup = () => {
-    if (requestTimeout) {
-      clearTimeout(requestTimeout);
-      requestTimeout = null;
-    }
-    if (!client.destroyed) {
-      client.destroy();
-    }
-  };
-
-  requestTimeout = setTimeout(() => {
-    setStatus('Error: Modbus request timed out');
-    cleanup();
-  }, 5000); // 5 second timeout
-
-  client.on('data', data => {
-    // setStatus(`Received chunk: ${data.toString('hex')}`);
-    // Ensure data is a Buffer before concatenation
-    const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-    responseBuffer = Buffer.concat([responseBuffer, dataBuffer]);
-    if (responseBuffer.length >= 6) {
-      // MBAP header received
-      const expectedLengthMBAP = responseBuffer.readUInt16BE(4); // Length field in MBAP
-      const totalExpectedLength = 6 + expectedLengthMBAP - 1; // MBAP + PDU (-1 because UnitID is counted in length field but part of MBAP header)
-      // Check if full response possibly received
-      if (responseBuffer.length >= totalExpectedLength) {
-        cleanup(); // Clear timeout, got potential full response
-        // Check for Modbus Exception Response (Function code MSB is set)
-        // MBAP(7 bytes) + PDU(starts with FC)
-        if (responseBuffer.length >= 8 && responseBuffer[7] & 0x80) {
-          const functionCode = responseBuffer[7] & 0x7f;
-          const exceptionCode = responseBuffer[8];
-          setStatus(
-            `Error: Modbus Exception ${exceptionCode} for function ${functionCode}`,
-          );
-        } else {
-          callback(responseBuffer); // Handle the successful response
-        }
+    const cleanup = (error?: Error) => {
+      if (requestTimeout) {
+        clearTimeout(requestTimeout);
+        requestTimeout = null;
       }
-      // If not complete, wait for more data or timeout
-    }
-  });
+      if (!client.destroyed) {
+        client.destroy();
+      }
+      if (error) {
+        console.error(`[sendModbusRequest Error] ${error.message}`);
+        reject(error); // Reject the promise on error
+      }
+    };
 
-  client.on('error', error => {
-    setStatus(`Error: ${error.message}`);
-    cleanup();
-  });
+    requestTimeout = setTimeout(() => {
+      cleanup(new Error('Modbus request timed out'));
+    }, 5000); // 5 second timeout
 
-  client.on('close', () => {
-    // If timeout didn't fire first, this might indicate an issue if no response was processed
-    // setStatus('Connection closed');
-    cleanup(); // Ensure timeout is cleared if closed prematurely
+    client.on('data', data => {
+      const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+      responseBuffer = Buffer.concat([responseBuffer, dataBuffer]);
+
+      if (responseBuffer.length >= 6) {
+        // Minimum MBAP header length
+        const expectedLengthMBAP = responseBuffer.readUInt16BE(4);
+        const totalExpectedLength = 6 + expectedLengthMBAP; // Correct total length
+
+        if (responseBuffer.length >= totalExpectedLength) {
+          // Check for Modbus Exception Response
+          if (responseBuffer.length >= 8 && responseBuffer[7] & 0x80) {
+            const functionCode = responseBuffer[7] & 0x7f;
+            const exceptionCode = responseBuffer[8];
+            cleanup(
+              new Error(
+                `Modbus Exception ${exceptionCode} for function ${functionCode}`,
+              ),
+            );
+          } else {
+            // Success!
+            cleanup(); // Clear timeout, close client
+            resolve(responseBuffer); // Resolve the promise with the data
+          }
+        }
+        // Else: Wait for more data or timeout
+      }
+    });
+
+    client.on('error', error => {
+      cleanup(error);
+    });
+
+    client.on('close', () => {
+      // If the promise hasn't resolved/rejected yet and timeout didn't fire,
+      // it means the connection closed unexpectedly.
+      if (requestTimeout) {
+        // Check if cleanup hasn't already happened
+        cleanup(new Error('Modbus connection closed unexpectedly'));
+      }
+    });
   });
 };
 
@@ -180,11 +184,8 @@ const toggleLamp = (
     writeValue,
   );
   setStatus(`Sending command to turn lamp ${value ? 'ON' : 'OFF'}...`);
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       if (
         data &&
         data.length >= 12 &&
@@ -198,9 +199,10 @@ const toggleLamp = (
           `Error: Unexpected response for toggleLamp: ${data?.toString('hex')}`,
         );
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error toggling lamp: ${error.message}`);
+    });
 };
 
 /**
@@ -217,11 +219,8 @@ const readPowerStatus = (
   const quantity = 1;
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x02, address, quantity);
   setStatus('Reading Power Status...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       if (data && data.length >= 10 && data[8] === 1) {
         // Byte count should be 1
         const statusBit = data[9] & 0x01;
@@ -236,9 +235,11 @@ const readPowerStatus = (
         );
         setPowerStatusState(null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error reading power status: ${error.message}`);
+      setPowerStatusState(null);
+    });
 };
 
 // --- UV Lamp Functions ---
@@ -276,11 +277,8 @@ const resetLampHours = (
   );
 
   setStatus(`Resetting UV ${lampIndex} Run Hours (Step 1/2)...`);
-  sendModbusRequest(
-    ip,
-    port,
-    requestOn,
-    responseOn => {
+  sendModbusRequest(ip, port, requestOn)
+    .then(responseOn => {
       if (
         responseOn &&
         responseOn.length >= 12 &&
@@ -288,174 +286,158 @@ const resetLampHours = (
         responseOn.readUInt16BE(8) === address
       ) {
         setStatus(`UV ${lampIndex} Run Hours Reset (Step 2/2)...`);
-        setTimeout(() => {
-          sendModbusRequest(
-            ip,
-            port,
-            requestOff,
-            responseOff => {
-              if (
-                responseOff &&
-                responseOff.length >= 12 &&
-                responseOff[7] === functionCode &&
-                responseOff.readUInt16BE(8) === address
-              ) {
-                setStatus(`UV ${lampIndex} Run Hours Reset Complete.`);
-              } else {
-                setStatus(
-                  `Error: Reset UV ${lampIndex} failed on Step 2 (OFF). Response: ${responseOff?.toString(
-                    'hex',
-                  )}`,
-                );
-              }
-            },
-            setStatus,
-          );
-        }, 500); // 500 ms delay
+        return new Promise(resolve => setTimeout(resolve, 500)) // Wait 500ms
+          .then(() => sendModbusRequest(ip, port, requestOff));
       } else {
-        setStatus(
-          `Error: Reset UV ${lampIndex} failed on Step 1 (ON). Response: ${responseOn?.toString(
+        throw new Error(
+          `Reset UV ${lampIndex} failed on Step 1 (ON). Response: ${responseOn?.toString(
             'hex',
           )}`,
         );
       }
-    },
-    setStatus,
-  );
+    })
+    .then(responseOff => {
+      if (
+        responseOff &&
+        responseOff.length >= 12 &&
+        responseOff[7] === functionCode &&
+        responseOff.readUInt16BE(8) === address
+      ) {
+        setStatus(`UV ${lampIndex} Run Hours Reset Complete.`);
+      } else {
+        throw new Error(
+          `Reset UV ${lampIndex} failed on Step 2 (OFF). Response: ${responseOff?.toString(
+            'hex',
+          )}`,
+        );
+      }
+    })
+    .catch(error => {
+      setStatus(`Error resetting UV ${lampIndex} hours: ${error.message}`);
+    });
 };
 
 /**
  * Read CURRENT and MAX lamp run hours for a specific UV lamp.
- * Current hours from input registers (2, 6, 10, 14)
- * Max hours from Lightlife_Hours_STPT (holding register 6)
+ * Returns a Promise that resolves with { currentHours, maxHours } or rejects on error.
+ * Assumes:
+ * - Current hours are UInt16 in INPUT registers (addresses 2, 6, 10, 14 for lamps 1-4)
+ * - Max hours are UInt16 in HOLDING registers (addresses 2, 6, 10, 14 for lamps 1-4)
  */
-const readLampHours = (
+const readLampHours = async (
   ip: string,
   port: number,
-  lampIndex: number,
-  onError: (msg: string) => void,
-  onSuccess: (lampIndex: number, hours: LampHours | null) => void,
-) => {
+  lampIndex: number, // 1, 2, 3, or 4
+): Promise<{currentHours: number; maxHours: number}> => {
+  if (lampIndex < 1 || lampIndex > 4) {
+    throw new Error(`Invalid lamp index ${lampIndex}`);
+  }
+
+  // Addresses based on lamp index (1-based) -> converted to 0-based for request
+  const addressMap = {1: 1, 2: 5, 3: 9, 4: 13}; // 0-based addresses for 2, 6, 10, 14
+  const registerAddress = addressMap[lampIndex as keyof typeof addressMap];
+
+  let currentHoursValue = 0;
+  let maxHoursValue = 8000; // Default max hours
+
+  // --- Read Current Hours (Input Register) ---
   try {
-    // Validate lampIndex
-    if (lampIndex < 1 || lampIndex > 4) {
-      onError(`Invalid lamp index: ${lampIndex}. Must be between 1-4.`);
-      onSuccess(lampIndex, null);
-      return;
-    }
-
-    const inputRegisterMap = {
-      1: 1, // Input register 2 → index 1
-      2: 5, // Input register 6 → index 5
-      3: 9, // Input register 10 → index 9
-      4: 13, // Input register 14 → index 13
-    };
-
-    const currentHoursAddr =
-      inputRegisterMap[lampIndex as keyof typeof inputRegisterMap];
-    const maxHoursAddr = 5; // Holding register 6 → index 5
-
-    console.log(
-      `[readLampHours] Reading lamp ${lampIndex} hours from ${ip}:${port}`,
-    );
-
-    // Read current hours - input register
     const currentRequest = createModbusRequest(
       MODBUS_UNIT_ID,
-      0x04, // FC04 Read Input Registers
-      currentHoursAddr,
-      1,
+      0x04, // Read Input Registers
+      registerAddress, // Use the mapped address
+      1, // Read 1 register for UInt16
+    );
+    console.log(
+      `[readLampHours ${lampIndex}] Sending current hours request (Input Reg ${
+        registerAddress + 1
+      })...`,
+    );
+    const currentData = await sendModbusRequest(ip, port, currentRequest);
+    console.log(
+      `[readLampHours ${lampIndex}] Received current hours data: ${currentData.toString(
+        'hex',
+      )}`,
     );
 
-    // Read max hours - holding register
+    if (currentData && currentData.length >= 11 && currentData[8] === 2) {
+      try {
+        currentHoursValue = currentData.readUInt16BE(9);
+        console.log(
+          `[readLampHours ${lampIndex}] Parsed current (Input Reg ${
+            registerAddress + 1
+          }): ${currentHoursValue}`,
+        );
+      } catch (e: any) {
+        console.error(
+          `[readLampHours ${lampIndex}] Error parsing current hours value: ${e.message}`,
+        );
+        throw new Error(`Parsing error for current hours (lamp ${lampIndex})`);
+      }
+    } else {
+      throw new Error(
+        `Invalid response for current hours. Len: ${currentData?.length}, BC: ${
+          currentData ? currentData[8] : 'N/A'
+        }`,
+      );
+    }
+  } catch (error: any) {
+    console.error(
+      `[readLampHours ${lampIndex}] Error reading current hours: ${error.message}`,
+    );
+    throw new Error(
+      `Failed to read current hours for lamp ${lampIndex}: ${error.message}`,
+    );
+  }
+
+  // --- Read Max Hours (Holding Register - Same Address Number) ---
+  try {
     const maxRequest = createModbusRequest(
       MODBUS_UNIT_ID,
-      0x03, // FC03 Read Holding Registers
-      maxHoursAddr,
-      1,
+      0x03, // Read Holding Registers
+      registerAddress, // Use the SAME mapped address
+      1, // Read 1 register for UInt16
+    );
+    console.log(
+      `[readLampHours ${lampIndex}] Sending max hours request (Holding Reg ${
+        registerAddress + 1
+      })...`,
+    );
+    const maxData = await sendModbusRequest(ip, port, maxRequest);
+    console.log(
+      `[readLampHours ${lampIndex}] Received max hours data: ${maxData.toString(
+        'hex',
+      )}`,
     );
 
-    let currentHours: number | null = null;
-    let maxHours: number | null = null;
-
-    const handleResponse = () => {
-      if (currentHours !== null && maxHours !== null) {
+    if (maxData && maxData.length >= 11 && maxData[8] === 2) {
+      try {
+        maxHoursValue = maxData.readUInt16BE(9);
         console.log(
-          `[readLampHours] Lamp ${lampIndex} → Current: ${currentHours}, Max: ${maxHours}`,
+          `[readLampHours ${lampIndex}] Parsed max (Holding Reg ${
+            registerAddress + 1
+          }): ${maxHoursValue}`,
         );
-        onSuccess(lampIndex, {
-          current: currentHours,
-          max: maxHours,
-        });
+      } catch (e: any) {
+        console.warn(
+          `[readLampHours ${lampIndex}] Error parsing max hours value: ${e.message}. Using default ${maxHoursValue}.`,
+        );
       }
-    };
-
-    // Read current hours
-    sendModbusRequest(
-      ip,
-      port,
-      currentRequest,
-      data => {
-        if (data && data.length >= 9 + 2 && data[8] === 0x04) {
-          try {
-            currentHours = data.readUInt16BE(9);
-            console.log(
-              `[readLampHours] Current hours raw data: ${data.toString('hex')}`,
-            );
-            handleResponse();
-          } catch (e) {
-            onError(
-              `Error parsing current hours for lamp ${lampIndex}: ${
-                e instanceof Error ? e.message : String(e)
-              }`,
-            );
-            onSuccess(lampIndex, null);
-          }
-        } else {
-          onError(`Invalid response for current hours (lamp ${lampIndex})`);
-          onSuccess(lampIndex, null);
-        }
-      },
-      msg =>
-        onError(`Error reading current hours for lamp ${lampIndex}: ${msg}`),
+    } else {
+      console.warn(
+        `[readLampHours ${lampIndex}] Invalid response for max hours. Using default ${maxHoursValue}. Len: ${
+          maxData?.length
+        }, BC: ${maxData ? maxData[8] : 'N/A'}`,
+      );
+    }
+  } catch (error: any) {
+    console.warn(
+      `[readLampHours ${lampIndex}] Error reading max hours: ${error.message}. Using default ${maxHoursValue}.`,
     );
-
-    // Read max hours
-    sendModbusRequest(
-      ip,
-      port,
-      maxRequest,
-      data => {
-        if (data && data.length >= 9 + 2 && data[8] === 0x03) {
-          try {
-            maxHours = data.readUInt16BE(9);
-            console.log(
-              `[readLampHours] Max hours raw data: ${data.toString('hex')}`,
-            );
-            handleResponse();
-          } catch (e) {
-            onError(
-              `Error parsing max hours for lamp ${lampIndex}: ${
-                e instanceof Error ? e.message : String(e)
-              }`,
-            );
-            onSuccess(lampIndex, null);
-          }
-        } else {
-          onError(`Invalid response for max hours (lamp ${lampIndex})`);
-          onSuccess(lampIndex, null);
-        }
-      },
-      msg => onError(`Error reading max hours for lamp ${lampIndex}: ${msg}`),
-    );
-  } catch (error) {
-    const errorMsg = `Unexpected error in readLampHours: ${
-      error instanceof Error ? error.message : String(error)
-    }`;
-    console.error(errorMsg);
-    onError(errorMsg);
-    onSuccess(lampIndex, null);
   }
+
+  // --- Return Result ---
+  return {currentHours: currentHoursValue, maxHours: maxHoursValue};
 };
 
 /**
@@ -486,11 +468,8 @@ const setLampLife = (
     writeData,
   );
   setStatus('Setting Lamp Life Setpoint...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       // Response for FC16: MBAP(7), FC(1), StartAddr(2), QuantityRegs(2) -> total 12 bytes
       if (
         data &&
@@ -508,9 +487,10 @@ const setLampLife = (
           )}`,
         );
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error setting lamp life: ${error.message}`);
+    });
 };
 
 /**
@@ -535,11 +515,8 @@ const readLampLifeSetpoint = (
     quantity,
   );
   setStatus('Reading Lamp Life Setpoint...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       // MBAP(7) + FC(1) + ByteCount(1) = 9 bytes header before data
       const expectedDataBytes = quantity * 2; // 2 bytes per register
 
@@ -569,9 +546,11 @@ const readLampLifeSetpoint = (
         );
         setSetpointValue(null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error reading lamp life setpoint: ${error.message}`);
+      setSetpointValue(null);
+    });
 };
 
 // --- Cleaning Status Functions ---
@@ -590,11 +569,8 @@ const readCombinedCleaningStatus = (
   const quantity = 1;
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x02, address, quantity);
   setStatus('Reading Combined Cleaning Status...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       if (data && data.length >= 10 && data[8] === 1) {
         const statusBit = data[9] & 0x01;
         const needsCleaning = statusBit === 1;
@@ -610,9 +586,11 @@ const readCombinedCleaningStatus = (
         );
         setCleaningStatus(null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error reading combined cleaning status: ${error.message}`);
+      setCleaningStatus(null);
+    });
 };
 
 /**
@@ -648,11 +626,8 @@ const resetCleaningHours = (
   );
 
   setStatus(`Resetting UV ${lampIndex} Cleaning Hours (Step 1/2)...`);
-  sendModbusRequest(
-    ip,
-    port,
-    requestOn,
-    responseOn => {
+  sendModbusRequest(ip, port, requestOn)
+    .then(responseOn => {
       if (
         responseOn &&
         responseOn.length >= 12 &&
@@ -660,40 +635,38 @@ const resetCleaningHours = (
         responseOn.readUInt16BE(8) === address
       ) {
         setStatus(`UV ${lampIndex} Cleaning Hours Reset (Step 2/2)...`);
-        setTimeout(() => {
-          sendModbusRequest(
-            ip,
-            port,
-            requestOff,
-            responseOff => {
-              if (
-                responseOff &&
-                responseOff.length >= 12 &&
-                responseOff[7] === functionCode &&
-                responseOff.readUInt16BE(8) === address
-              ) {
-                setStatus(`UV ${lampIndex} Cleaning Hours Reset Complete.`);
-              } else {
-                setStatus(
-                  `Error: Reset Cleaning UV ${lampIndex} failed on Step 2 (OFF). Response: ${responseOff?.toString(
-                    'hex',
-                  )}`,
-                );
-              }
-            },
-            setStatus,
-          );
-        }, 500);
+        return new Promise(resolve => setTimeout(resolve, 500)).then(() =>
+          sendModbusRequest(ip, port, requestOff),
+        );
       } else {
-        setStatus(
+        throw new Error(
           `Error: Reset Cleaning UV ${lampIndex} failed on Step 1 (ON). Response: ${responseOn?.toString(
             'hex',
           )}`,
         );
       }
-    },
-    setStatus,
-  );
+    })
+    .then(responseOff => {
+      if (
+        responseOff &&
+        responseOff.length >= 12 &&
+        responseOff[7] === functionCode &&
+        responseOff.readUInt16BE(8) === address
+      ) {
+        setStatus(`UV ${lampIndex} Cleaning Hours Reset Complete.`);
+      } else {
+        throw new Error(
+          `Error: Reset Cleaning UV ${lampIndex} failed on Step 2 (OFF). Response: ${responseOff?.toString(
+            'hex',
+          )}`,
+        );
+      }
+    })
+    .catch(error => {
+      setStatus(
+        `Error resetting UV ${lampIndex} cleaning hours: ${error.message}`,
+      );
+    });
 };
 
 /**
@@ -720,11 +693,8 @@ const readLampCleaningRunHours = (
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x04, address, quantity); // FC04 Read Input Registers
 
   setStatus(`Reading UV ${lampIndex} Cleaning Run Hours...`);
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       const expectedDataBytes = 4;
       if (
         data &&
@@ -743,15 +713,19 @@ const readLampCleaningRunHours = (
         }
       } else {
         setStatus(
-          `Error: Invalid response for readLampCleaningRunHours UV ${lampIndex}: ${data?.toString(
+          `Error: Invalid response for readLampCleaningRunHours: ${data?.toString(
             'hex',
           )}`,
         );
         setCleanRunHours(lampIndex, null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(
+        `Error reading UV ${lampIndex} Cleaning Run Hours: ${error.message}`,
+      );
+      setCleanRunHours(lampIndex, null);
+    });
 };
 
 /**
@@ -782,11 +756,8 @@ const setCleaningHours = (
     writeData,
   );
   setStatus('Setting Cleaning Hours Setpoint...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       if (
         data &&
         data.length >= 12 &&
@@ -805,10 +776,12 @@ const setCleaningHours = (
           )}`,
         );
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error setting cleaning hours: ${error.message}`);
+    });
 };
+
 /**
  * Read cleaning hours setpoint (Holding 2 -> 0-based 1).
  * Matches Python: read_clean_setpoint() -> read_holding(addr=2, count=2, data_type="float32") -> FC03
@@ -831,11 +804,8 @@ const readCleaningHoursSetpoint = (
     quantity,
   );
   setStatus('Reading Cleaning Hours Setpoint...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       const expectedDataBytes = 4;
       if (
         data &&
@@ -860,9 +830,11 @@ const readCleaningHoursSetpoint = (
         );
         setSetpointValue(null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error reading cleaning hours setpoint: ${error.message}`);
+      setSetpointValue(null);
+    });
 };
 
 // --- Sensors Functions ---
@@ -881,11 +853,8 @@ const readDPS = (
   const quantity = 1;
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x02, address, quantity);
   setStatus('Reading DPS Status...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       if (data && data.length >= 10 && data[8] === 1) {
         const statusBit = data[9] & 0x01;
         const isOk = statusBit === 1;
@@ -899,9 +868,11 @@ const readDPS = (
         );
         setDpsStatus(null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error reading DPS status: ${error.message}`);
+      setDpsStatus(null);
+    });
 };
 
 /**
@@ -919,11 +890,8 @@ const readPressureButton = (
   const quantity = 1;
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x02, address, quantity);
   setStatus('Reading Pressure Button Status...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       if (data && data.length >= 10 && data[8] === 1) {
         const statusBit = data[9] & 0x01;
         const isOk = statusBit === 1;
@@ -941,9 +909,11 @@ const readPressureButton = (
         );
         setButtonStatus(null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error reading pressure button status: ${error.message}`);
+      setButtonStatus(null);
+    });
 };
 
 /**
@@ -961,11 +931,8 @@ const readLampsOnline = (
   const quantity = 2; // Read 2 registers for float32 (matches Python)
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x04, address, quantity); // FC04 Read Input Registers
   setStatus('Reading Number of Lamps Online...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       const expectedDataBytes = 4;
       if (
         data &&
@@ -991,9 +958,11 @@ const readLampsOnline = (
         );
         setLampsOnlineCount(null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error reading lamps online: ${error.message}`);
+      setLampsOnlineCount(null);
+    });
 };
 
 /**
@@ -1011,11 +980,8 @@ const readCurrentAmps = (
   const quantity = 2; // Read 2 registers for float32 (matches Python)
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x04, address, quantity);
   setStatus('Reading Current Amps (CT)...');
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       const expectedDataBytes = 4;
       if (
         data &&
@@ -1038,9 +1004,11 @@ const readCurrentAmps = (
         );
         setCurrentAmpsValue(null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(`Error reading current amps: ${error.message}`);
+      setCurrentAmpsValue(null);
+    });
 };
 
 // --- Potentially Missing but Present in Python (Add if needed) ---
@@ -1066,11 +1034,8 @@ const readLampCleanStatus = (
   const quantity = 1;
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x02, address, quantity);
   setStatus(`Reading UV ${lampIndex} Clean Status...`);
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       if (data && data.length >= 10 && data[8] === 1) {
         const statusBit = data[9] & 0x01;
         const needsCleaning = statusBit === 1; // Assuming 1 = Needs Cleaning
@@ -1086,9 +1051,13 @@ const readLampCleanStatus = (
         );
         setCleanStat(lampIndex, null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(
+        `Error reading lamp clean status ${lampIndex}: ${error.message}`,
+      );
+      setCleanStat(lampIndex, null);
+    });
 };
 
 /**
@@ -1112,11 +1081,8 @@ const readLampLifeStatus = (
   const quantity = 1;
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x02, address, quantity);
   setStatus(`Reading UV ${lampIndex} Life Status...`);
-  sendModbusRequest(
-    ip,
-    port,
-    request,
-    data => {
+  sendModbusRequest(ip, port, request)
+    .then(data => {
       if (data && data.length >= 10 && data[8] === 1) {
         const statusBit = data[9] & 0x01;
         const endOfLife = statusBit === 1; // Assuming 1 = End of Life reached
@@ -1132,9 +1098,13 @@ const readLampLifeStatus = (
         );
         setLifeStat(lampIndex, null);
       }
-    },
-    setStatus,
-  );
+    })
+    .catch(error => {
+      setStatus(
+        `Error reading lamp life status ${lampIndex}: ${error.message}`,
+      );
+      setLifeStat(lampIndex, null);
+    });
 };
 
 // --- Export Functions ---

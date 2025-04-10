@@ -108,7 +108,6 @@ export const LampLifeScreen = () => {
 
   // --- Fetch Devices and Current Setpoint when selectedSection changes ---
   useEffect(() => {
-    // Reset devices and setpoint when section changes
     setDevices([]);
     setCurrentSetpoint(null);
     setNewValue('');
@@ -116,152 +115,129 @@ export const LampLifeScreen = () => {
 
     if (selectedSection && selectedSection.ip) {
       setLoading(true);
-      let isActive = true; // Flag for async cleanup
+      let isActive = true;
+      const modbus_ip = selectedSection.ip;
+      const modbus_port = 502;
 
-      // Set a safety timeout to ensure loading state is reset even if requests fail
       const safetyTimeout = setTimeout(() => {
         if (isActive) {
-          logStatus(
-            'Timeout while fetching lamp data. Some data may be incomplete.',
-            true,
-          );
+          logStatus('Overall fetch timeout. Some data might be missing.', true);
           setLoading(false);
         }
-      }, 15000); // 15 second timeout
+      }, 45000); // 45 seconds total timeout
 
-      logStatus(`Fetching devices and setpoint for ${selectedSection.name}...`);
+      logStatus(
+        `Fetching devices for ${selectedSection.name} (${modbus_ip})...`,
+      );
 
-      const fetchDataForSection = async () => {
+      const fetchData = async () => {
         try {
-          // 1. Fetch Devices for the selected section (to display cards)
-          getDevicesForSection(selectedSection.id, devicesFromDb => {
-            if (!isActive) return;
-
-            setDevices(devicesFromDb || []);
-            logStatus(`Found ${devicesFromDb?.length || 0} devices.`);
-
-            // Fetch lamp hours for each device
-            if (devicesFromDb?.length > 0) {
-              // First fetch max setpoint from lamp 1
-              readLampHours(
-                selectedSection.ip!,
-                502,
-                1,
-                msg => {
-                  // Only log errors
-                  if (msg.toLowerCase().includes('error')) {
-                    logStatus(msg, true);
-                  }
-                },
-                (lampIdx, hours) => {
-                  // Always set loading to false if this first request completes (success or failure)
-                  // This ensures we don't get stuck in loading state
-
-                  if (hours && isActive) {
-                    logStatus(`Global max hours setpoint: ${hours.max}`);
-                    setCurrentSetpoint(hours.max);
-                    setNewValue(hours.max.toString());
-
-                    // Store lamp 1 hours
-                    setLampHours(prev => ({
-                      ...prev,
-                      [1]: hours,
-                    }));
-
-                    // Now fetch hours for remaining lamps (2-4)
-                    // We'll proceed regardless of success/failure for these
-                    [1, 2, 3, 4].forEach(lampIndex => {
-                      if (!isActive) return;
-
-                      readLampHours(
-                        selectedSection.ip!,
-                        502,
-                        lampIndex,
-                        msg => {
-                          // Only log errors
-                          if (msg.toLowerCase().includes('error')) {
-                            logStatus(
-                              `Error reading lamp ${lampIndex}: ${msg}`,
-                              true,
-                            );
-                          }
-                        },
-                        (idx, lampHours) => {
-                          if (!isActive) return;
-
-                          if (lampHours) {
-                            logStatus(
-                              `Lamp ${idx} hours: Current ${lampHours.current}, Max ${lampHours.max}`,
-                            );
-                            setLampHours(prev => ({
-                              ...prev,
-                              [idx]: lampHours,
-                            }));
-                          } else {
-                            logStatus(
-                              `Failed to read hours for lamp ${idx}, using defaults`,
-                              true,
-                            );
-                            setLampHours(prev => ({
-                              ...prev,
-                              [idx]: {
-                                current: 0,
-                                max: hours ? hours.max : 5000,
-                              },
-                            }));
-                          }
-                        },
-                      );
-                    });
-                  } else {
-                    // Default if reading first lamp fails
-                    logStatus(
-                      'Failed to read lamp life hours. Using default 5000.',
-                      true,
-                    );
-                    setCurrentSetpoint(5000);
-                    setNewValue('5000');
-
-                    // Set default values for all lamps
-                    const defaultHours = {current: 0, max: 5000};
-                    setLampHours({
-                      1: defaultHours,
-                      2: defaultHours,
-                      3: defaultHours,
-                      4: defaultHours,
-                    });
-                  }
-
-                  // Always set loading to false once we've processed the first lamp
-                  // This ensures the UI updates even if we're still waiting for other lamps
-                  setLoading(false);
-                },
-              );
-            } else {
-              setLoading(false);
-            }
+          // Fetch devices from DB first
+          const devicesFromDb = await new Promise<any[] | null>(resolve => {
+            getDevicesForSection(selectedSection.id, resolve);
           });
+
+          if (!isActive) return;
+
+          setDevices(devicesFromDb || []);
+          logStatus(
+            `Found ${
+              devicesFromDb?.length || 0
+            } devices. Reading lamp hours...`,
+          );
+
+          if (!devicesFromDb || devicesFromDb.length === 0) {
+            setLoading(false);
+            return;
+          }
+
+          // --- Sequential Lamp Reading with Async/Await ---
+          let allLampsReadSuccessfully = true;
+          let globalMaxHours = 8000; // Default
+          const updatedLampHours: {[key: number]: LampHours} = {};
+
+          for (let lampIndex = 1; lampIndex <= 4; lampIndex++) {
+            if (!isActive) break;
+
+            try {
+              logStatus(`Reading lamp ${lampIndex} from ${modbus_ip}...`);
+              const result = await readLampHours(
+                modbus_ip,
+                modbus_port,
+                lampIndex,
+              );
+
+              logStatus(
+                `Success reading Lamp ${lampIndex}: ${Math.floor(
+                  result.currentHours,
+                )}/${Math.floor(result.maxHours)}`,
+              );
+              updatedLampHours[lampIndex] = {
+                current: result.currentHours,
+                max: result.maxHours,
+              };
+
+              // Set global setpoint from lamp 1
+              if (lampIndex === 1) {
+                globalMaxHours = result.maxHours;
+                if (isActive) {
+                  setCurrentSetpoint(result.maxHours);
+                  setNewValue(Math.floor(result.maxHours).toString());
+                }
+              }
+            } catch (error: any) {
+              allLampsReadSuccessfully = false;
+              logStatus(
+                `Failed to read lamp ${lampIndex}: ${error.message || error}`,
+                true,
+              );
+              // Use default/fallback values
+              updatedLampHours[lampIndex] = {current: 0, max: globalMaxHours};
+            }
+
+            // Wait before next read (except after the last one)
+            if (isActive && lampIndex < 4) {
+              const delay = 3000; // 3 second delay
+              logStatus(
+                `Waiting ${delay / 1000}s before reading lamp ${
+                  lampIndex + 1
+                }...`,
+              );
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+          }
+
+          // --- Update State After Loop ---
+          if (isActive) {
+            setLampHours(updatedLampHours);
+            if (allLampsReadSuccessfully) {
+              logStatus('All lamp hours loaded successfully.');
+            } else {
+              logStatus(
+                'Finished reading lamp hours, but some reads failed.',
+                true,
+              );
+            }
+            setLoading(false);
+          }
         } catch (error: any) {
           if (!isActive) return;
-          logStatus(
-            `Error fetching data for ${selectedSection.name}: ${error.message}`,
-            true,
-          );
+          logStatus(`Error fetching data: ${error.message}`, true);
           setDevices([]);
-          setCurrentSetpoint(5000);
-          setNewValue('5000'); // Reset/Default on error
+          setCurrentSetpoint(8000);
+          setNewValue('8000');
           setLoading(false);
         }
       };
 
-      fetchDataForSection();
+      fetchData();
 
       return () => {
         isActive = false;
         clearTimeout(safetyTimeout);
-      }; // Cleanup
+      };
     } else {
-      setDevices([]); // Clear devices if no section/IP
+      setDevices([]); // Clear if no section or IP
     }
   }, [selectedSection, logStatus]);
 
