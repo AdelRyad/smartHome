@@ -1,22 +1,48 @@
 package com.smarthomeapp
 
+import android.app.ActivityManager
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
+import android.content.Context
+import android.os.Bundle
+import android.view.View
 import com.facebook.react.ReactActivity
-import com.facebook.react.ReactActivityDelegate
-import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
-import com.facebook.react.defaults.DefaultReactActivityDelegate
 
 class MainActivity : ReactActivity() {
+    override fun getMainComponentName(): String = "SmartHomeApp"
 
-  /**
-   * Returns the name of the main component registered from JavaScript. This is used to schedule
-   * rendering of the component.
-   */
-  override fun getMainComponentName(): String = "SmartHomeApp"
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enforceKioskMode()
+        hideSystemUI()
+    }
 
-  /**
-   * Returns the instance of the [ReactActivityDelegate]. We use [DefaultReactActivityDelegate]
-   * which allows you to enable New Architecture with a single boolean flags [fabricEnabled]
-   */
-  override fun createReactActivityDelegate(): ReactActivityDelegate =
-      DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
+    private fun enforceKioskMode() {
+        val devicePolicyManager = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+
+        if (devicePolicyManager.isDeviceOwnerApp(packageName)) {
+            val adminComponent = ComponentName(this, KioskDeviceAdminReceiver::class.java)
+            devicePolicyManager.setLockTaskPackages(adminComponent, arrayOf(packageName))
+        }
+
+        if (activityManager.lockTaskModeState == ActivityManager.LOCK_TASK_MODE_NONE) {
+            startLockTask()
+        }
+    }
+
+    private fun hideSystemUI() {
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                or View.SYSTEM_UI_FLAG_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        )
+    }
+
+    override fun onBackPressed() {
+        // Prevent back button exit
+    }
 }
