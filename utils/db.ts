@@ -300,8 +300,8 @@ export const updateContactInfo = async (
         contact.email,
         contact.phone,
         contact.projectRefrence, // Value from object (camelCase)
-        contact.hoodRefrence,    // Value from object (camelCase)
-        contact.commissionDate,  // Value from object (camelCase)
+        contact.hoodRefrence, // Value from object (camelCase)
+        contact.commissionDate, // Value from object (camelCase)
       ],
       (_, resultSet) => {
         // Check if the update was successful (e.g., rowsAffected > 0)

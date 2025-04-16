@@ -55,10 +55,10 @@ const IpAddressScreen = () => {
       getSectionsWithStatus(sections => {
         const formattedSections = sections.map(section => ({
           id: section.id!,
-          name: section.name,
+          name: section.name || '', // Ensure 'name' exists or provide a default value
           ip: section.ip,
-          cleaningDays: section.cleaningDays,
-          working: section.working,
+          cleaningDays: section.cleaningDays || 0, // Provide default values if necessary
+          working: section.working || false,
         }));
         setSections(formattedSections);
       });

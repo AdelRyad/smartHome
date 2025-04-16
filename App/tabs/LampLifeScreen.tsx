@@ -7,30 +7,26 @@ import {
   FlatList,
   TextInput,
   ActivityIndicator,
-  useWindowDimensions, // Added useWindowDimensions back
+  useWindowDimensions,
 } from 'react-native';
 import Layout from '../../components/Layout';
-import {COLORS} from '../../constants/colors'; // Use your colors path
+import {COLORS} from '../../constants/colors';
 import {
   CheckIcon,
   CheckIcon2,
   CloseIcon,
   EditIcon,
   LampIcon,
-} from '../../icons'; // Use your icons path
+} from '../../icons';
 import CustomTabBar from '../../components/CustomTabBar';
 import PopupModal from '../../components/PopupModal';
-import {
-  getSectionsWithStatus,
-  // updateSectionDeviceStatus, // No longer updating individual device status in DB for setpoint
-  getDevicesForSection, // Keep this to display the 6 device cards
-} from '../../utils/db'; // Use your DB utils path
+import {getSectionsWithStatus, getDevicesForSection} from '../../utils/db';
 
 // --- IMPORT NEW MODBUS FUNCTIONS ---
 import {
-  setLampLife, // Writes float32 via FC16 for the GLOBAL setpoint
-  readLampHours, // Read current and max lamp hours
-} from '../../utils/modbus'; // Use your modbus path
+  setLampMaxHours, // Writes UInt16 via FC06 to specific lamp HR (1, 5, 9, 13)
+  readLifeHoursSetpoint,
+} from '../../utils/modbus';
 
 // Define SectionSummary type
 interface SectionSummary {
@@ -40,25 +36,13 @@ interface SectionSummary {
   working: boolean;
 }
 
-// Define the LampHours interface
+// Lamp hours interface
 interface LampHours {
-  current: number;
-  max: number;
+  currentHours: number;
 }
-
-// Define Device type (matching original structure)
-/*
-interface Device {
-  id: number;
-  name: string; // Assuming 'name' instead of 'title' based on grid item render
-  workingHours: number; // Keep for structure, but value might not be directly used/accurate for setpoint display
-  workingStatus: boolean; // Keep if needed
-  // Add other fields if they exist in getDevicesForSection result
-}
-*/
 
 export const LampLifeScreen = () => {
-  const {width, height} = useWindowDimensions(); // Keep for layout
+  const {width, height} = useWindowDimensions();
   const isPortrait = height > width;
 
   // --- State ---
@@ -66,246 +50,270 @@ export const LampLifeScreen = () => {
   const [selectedSection, setSelectedSection] = useState<SectionSummary | null>(
     null,
   );
-  const [devices, setDevices] = useState<any[]>([]); // Use any[] initially, type will be inferred
-  const [currentSetpoint, setCurrentSetpoint] = useState<number | null>(null); // Holds value read from PLC
-  const [newValue, setNewValue] = useState<string>(''); // Input value (string) - used for ALL devices when saving
+  const [devices, setDevices] = useState<any[]>([]);
   const [edit, setEdit] = useState(false);
-  const [modalVisible, setModalVisible] = useState(false); // Confirmation modal
-  const [focusedInputId, setFocusedInputId] = useState<number | null>(null); // Track focus per device card input
+  const [focusedInputId, setFocusedInputId] = useState<number | null>(null);
   const [statusMessage, setStatusMessage] = useState('');
   const [loading, setLoading] = useState(false);
-  const [lampHours, setLampHours] = useState<{[key: number]: LampHours}>({});
+  const [lampHours, setLampHours] = useState<{[deviceId: number]: LampHours}>(
+    {},
+  );
+  const [editedMaxHours, setEditedMaxHours] = useState<{
+    [deviceId: number]: string;
+  }>({});
+  const [modalVisible, setModalVisible] = useState(false);
 
   // --- Status Log Function ---
   const logStatus = useCallback((message: string, isError = false) => {
-    console.log(`[Lamp Life Screen Status] ${message}`);
+    console.log(`[Lamp Life Status] ${message}`);
     setStatusMessage(message);
     setTimeout(() => setStatusMessage(''), isError ? 6000 : 4000);
   }, []);
 
-  // --- Fetch Sections List (Only with IP) ---
+  // --- Helper: Fetch All Lamp Data for Section (Sequential) ---
+  const fetchAllLampDataForSection = useCallback(
+    async (section: SectionSummary | null) => {
+      if (!section || !section.ip) {
+        setLampHours({});
+        setDevices([]); // Clear devices if no section/IP
+        logStatus('No section selected or section has no IP address.');
+        return;
+      }
+
+      setLoading(true);
+      logStatus(`Fetching data for section: ${section.name}...`);
+
+      try {
+        const devicesFromDb = await new Promise<any[]>(resolve => {
+          getDevicesForSection(section.id, resolve);
+        });
+        setDevices(devicesFromDb || []); // Set devices state
+
+        if (!devicesFromDb || devicesFromDb.length === 0) {
+          logStatus(`No devices found for section ${section.name}.`);
+          setLampHours({});
+          setLoading(false);
+          return;
+        }
+
+        const fetchedHours: {[deviceId: number]: LampHours} = {};
+        const deviceIds = devicesFromDb.map(d => d.id).sort((a, b) => a - b); // Process in order
+
+        logStatus(`Reading shared max hours for section...`);
+
+        let sharedMaxHours: number | null = null;
+        try {
+          sharedMaxHours = await readLifeHoursSetpoint(section.ip, 502);
+          logStatus(`Shared max hours fetched successfully: ${sharedMaxHours}`);
+        } catch (error: any) {
+          logStatus(
+            `Failed to fetch shared max hours: ${
+              error.message || String(error)
+            }`,
+            true,
+          );
+        }
+
+        if (sharedMaxHours !== null) {
+          for (const deviceId of deviceIds) {
+            const lampIndex = deviceId; // Assuming device ID maps directly to lamp index (1-4)
+            if (lampIndex < 1 || lampIndex > 4) {
+              logStatus(`Skipping device ID ${deviceId} - invalid lamp index.`);
+              continue; // Skip if ID is not a valid lamp index
+            }
+            fetchedHours[deviceId] = {currentHours: sharedMaxHours};
+          }
+        } else {
+          logStatus('Shared max hours not available. Defaulting to 0.', true);
+          for (const deviceId of deviceIds) {
+            fetchedHours[deviceId] = {currentHours: 0};
+          }
+        }
+
+        setLampHours(fetchedHours);
+        logStatus('Finished fetching lamp data.');
+      } catch (dbError: any) {
+        logStatus(`Database error fetching devices: ${dbError.message}`, true);
+        setDevices([]);
+        setLampHours({});
+      } finally {
+        setLoading(false);
+      }
+    },
+    [logStatus], // Dependencies
+  );
+
+  // --- Fetch Sections List ---
   useEffect(() => {
     setLoading(true);
     getSectionsWithStatus(fetchedSections => {
-      const sectionsWithIp = fetchedSections
-        .filter(section => !!section.ip) // <-- FILTER: Only sections with an IP
+      const formattedSections = fetchedSections
+        .filter(section => !!section.ip) // Only include sections with an IP
         .map(section => ({
           id: section.id!,
           name: section.name,
           ip: section.ip,
           working: section.working,
         }));
-      setSections(sectionsWithIp);
-      if (sectionsWithIp.length > 0) {
-        setSelectedSection(sectionsWithIp[0]); // Select first valid one
+      setSections(formattedSections);
+
+      // Select the first section automatically if available
+      if (formattedSections.length > 0) {
+        setSelectedSection(formattedSections[0]);
       } else {
-        setSelectedSection(null);
+        setSelectedSection(null); // No sections available
         logStatus('No sections with IP addresses found.', true);
       }
       setLoading(false);
     });
   }, [logStatus]);
 
-  // --- Fetch Devices and Current Setpoint when selectedSection changes ---
+  // --- Fetch Lamp Data when Selected Section Changes ---
   useEffect(() => {
-    setDevices([]);
-    setCurrentSetpoint(null);
-    setNewValue('');
-    setLampHours({});
+    fetchAllLampDataForSection(selectedSection);
+    setEdit(false); // Exit edit mode when section changes
+    setEditedMaxHours({}); // Clear edits when section changes
+  }, [selectedSection, fetchAllLampDataForSection]);
 
-    if (selectedSection && selectedSection.ip) {
-      setLoading(true);
-      let isActive = true;
-      const modbus_ip = selectedSection.ip;
-      const modbus_port = 502;
+  // --- Edit Mode Handling ---
+  const handleEdit = () => {
+    // Initialize based on the first available lamp or a default
+    const firstLampId = devices.find(d => d.id >= 1 && d.id <= 4)?.id;
+    const initialValue = firstLampId
+      ? lampHours[firstLampId]?.currentHours ?? 0
+      : 0;
 
-      const safetyTimeout = setTimeout(() => {
-        if (isActive) {
-          logStatus('Overall fetch timeout. Some data might be missing.', true);
-          setLoading(false);
-        }
-      }, 45000); // 45 seconds total timeout
-
-      logStatus(
-        `Fetching devices for ${selectedSection.name} (${modbus_ip})...`,
-      );
-
-      const fetchData = async () => {
-        try {
-          // Fetch devices from DB first
-          const devicesFromDb = await new Promise<any[] | null>(resolve => {
-            getDevicesForSection(selectedSection.id, resolve);
-          });
-
-          if (!isActive) return;
-
-          setDevices(devicesFromDb || []);
-          logStatus(
-            `Found ${
-              devicesFromDb?.length || 0
-            } devices. Reading lamp hours...`,
-          );
-
-          if (!devicesFromDb || devicesFromDb.length === 0) {
-            setLoading(false);
-            return;
-          }
-
-          // --- Sequential Lamp Reading with Async/Await ---
-          let allLampsReadSuccessfully = true;
-          let globalMaxHours = 8000; // Default
-          const updatedLampHours: {[key: number]: LampHours} = {};
-
-          for (let lampIndex = 1; lampIndex <= 4; lampIndex++) {
-            if (!isActive) break;
-
-            try {
-              logStatus(`Reading lamp ${lampIndex} from ${modbus_ip}...`);
-              const result = await readLampHours(
-                modbus_ip,
-                modbus_port,
-                lampIndex,
-              );
-
-              logStatus(
-                `Success reading Lamp ${lampIndex}: ${Math.floor(
-                  result.currentHours,
-                )}/${Math.floor(result.maxHours)}`,
-              );
-              updatedLampHours[lampIndex] = {
-                current: result.currentHours,
-                max: result.maxHours,
-              };
-
-              // Set global setpoint from lamp 1
-              if (lampIndex === 1) {
-                globalMaxHours = result.maxHours;
-                if (isActive) {
-                  setCurrentSetpoint(result.maxHours);
-                  setNewValue(Math.floor(result.maxHours).toString());
-                }
-              }
-            } catch (error: any) {
-              allLampsReadSuccessfully = false;
-              logStatus(
-                `Failed to read lamp ${lampIndex}: ${error.message || error}`,
-                true,
-              );
-              // Use default/fallback values
-              updatedLampHours[lampIndex] = {current: 0, max: globalMaxHours};
-            }
-
-            // Wait before next read (except after the last one)
-            if (isActive && lampIndex < 4) {
-              const delay = 3000; // 3 second delay
-              logStatus(
-                `Waiting ${delay / 1000}s before reading lamp ${
-                  lampIndex + 1
-                }...`,
-              );
-              await new Promise(resolve => setTimeout(resolve, delay));
-            }
-          }
-
-          // --- Update State After Loop ---
-          if (isActive) {
-            setLampHours(updatedLampHours);
-            if (allLampsReadSuccessfully) {
-              logStatus('All lamp hours loaded successfully.');
-            } else {
-              logStatus(
-                'Finished reading lamp hours, but some reads failed.',
-                true,
-              );
-            }
-            setLoading(false);
-          }
-        } catch (error: any) {
-          if (!isActive) return;
-          logStatus(`Error fetching data: ${error.message}`, true);
-          setDevices([]);
-          setCurrentSetpoint(8000);
-          setNewValue('8000');
-          setLoading(false);
-        }
-      };
-
-      fetchData();
-
-      return () => {
-        isActive = false;
-        clearTimeout(safetyTimeout);
-      };
-    } else {
-      setDevices([]); // Clear if no section or IP
-    }
-  }, [selectedSection, logStatus]);
-
-  // --- Handle Section Selection ---
-  const handleSectionSelect = (section: SectionSummary) => {
-    if (section.id !== selectedSection?.id) {
-      setSelectedSection(section);
-      setEdit(false); // Exit edit mode
-    }
-  };
-
-  // --- Handle Input Change (Update the single 'newValue' state) ---
-  const handleInputChange = (value: string) => {
-    // Allow only numbers
-    const numericValue = value.replace(/[^0-9]/g, '');
-    setNewValue(numericValue);
-  };
-
-  // --- Handle Save Confirmation (Modal Confirm) ---
-  const handleConfirmChanges = () => {
-    if (!selectedSection || !selectedSection.ip) {
-      logStatus('No section selected or section has no IP.', true);
-      setModalVisible(false);
-      return;
-    }
-
-    const numericNewValue = parseFloat(newValue);
-    if (
-      isNaN(numericNewValue) ||
-      numericNewValue < 0 ||
-      numericNewValue > 8000
-    ) {
-      // Added max check
-      logStatus('Invalid input. Please enter hours between 0 and 8000.', true);
-      return;
-    }
-
-    setModalVisible(false);
-    setLoading(true);
-    logStatus(
-      `Setting GLOBAL lamp life setpoint for ${
-        selectedSection.name
-      } to ${numericNewValue.toFixed(0)}...`,
-    );
-
-    // --- Use NEW setLampLife function (expects float, uses FC16) ---
-    setLampLife(selectedSection.ip, 502, numericNewValue, msg => {
-      logStatus(`Modbus update: ${msg}`);
-      setLoading(false);
-      if (!msg.toLowerCase().includes('error')) {
-        logStatus(
-          `Lamp life setpoint updated successfully for ${selectedSection.name}.`,
-        );
-        setCurrentSetpoint(numericNewValue); // Update the displayed current setpoint
-        // No individual device DB update needed for the global setpoint
-        setEdit(false);
-      } else {
-        logStatus(
-          `Failed to set lamp life setpoint for ${selectedSection.name}.`,
-          true,
-        );
-        // Optionally revert newValue to currentSetpoint
-        // setNewValue(currentSetpoint?.toString() ?? '');
+    const initialEdits: {[deviceId: number]: string} = {};
+    // Apply the same initial value to all potential lamps (1-4)
+    devices.forEach(device => {
+      if (device.id >= 1 && device.id <= 4) {
+        initialEdits[device.id] = initialValue.toString();
       }
+    });
+
+    setEditedMaxHours(initialEdits);
+    setEdit(true);
+  };
+
+  const handleCancel = () => {
+    setEditedMaxHours({}); // Clear pending edits
+    setEdit(false);
+    logStatus('Changes cancelled.');
+  };
+
+  // --- Handle Input Change during Edit (Sync all inputs) ---
+  const handleInputChange = (deviceId: number, text: string) => {
+    const numericText = text.replace(/[^0-9.]/g, '');
+    // Update the value for ALL lamps currently being displayed
+    setEditedMaxHours(prev => {
+      const newState = {...prev};
+      devices.forEach(device => {
+        if (device.id >= 1 && device.id <= 4) {
+          newState[device.id] = numericText;
+        }
+      });
+      return newState;
     });
   };
 
-  // --- Render Functions --- (Using original structure and styles)
+  // --- Execute Save Changes (Small Adjustment) ---
+  const executeSaveChanges = async () => {
+    setModalVisible(false); // Close modal first
+    if (!selectedSection || !selectedSection.ip) {
+      logStatus('Cannot save: No section selected or section has no IP.', true);
+      return;
+    }
+
+    setLoading(true);
+    logStatus('Saving shared max hours...');
+    const sectionIp = selectedSection.ip;
+    let writeError = false;
+
+    // Get the first device ID key from editedMaxHours/lampHours
+    const firstEditedKey = Object.keys(editedMaxHours)[0];
+    const firstLampKey = Object.keys(lampHours)[0];
+
+    // Ensure keys exist before parsing and accessing
+    const editedValueStr = firstEditedKey
+      ? editedMaxHours[parseInt(firstEditedKey, 10)]
+      : '0';
+    const originalMax = firstLampKey
+      ? lampHours[parseInt(firstLampKey, 10)]?.currentHours
+      : undefined;
+
+    const editedValueNum = parseInt(editedValueStr, 10);
+
+    // Check if the value is valid and different from original
+    if (
+      !isNaN(editedValueNum) &&
+      editedValueNum >= 0 &&
+      editedValueNum <= 65535 &&
+      editedValueNum !== originalMax
+    ) {
+      try {
+        // Call setLampMaxHours ONCE with the shared value.
+        // The lampIndex argument is ignored by the function now, but pass 1 for compatibility.
+        await setLampMaxHours(sectionIp, 502, editedValueNum, logStatus);
+      } catch (error) {
+        const errorMsg = `Write failed for Shared Max Hours: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        logStatus(errorMsg, true);
+        writeError = true;
+      }
+    } else if (editedValueNum === originalMax) {
+      logStatus('No changes detected in max hours.');
+    } else {
+      logStatus(
+        `Invalid value entered: ${editedValueStr}. Save cancelled.`,
+        true,
+      );
+      writeError = true; // Treat invalid input as an error for refresh logic
+    }
+
+    logStatus(
+      writeError ? 'Save completed with error(s).' : 'Save successful.',
+      writeError,
+    );
+
+    setLoading(false);
+
+    // Refresh data only if there were NO errors
+    if (!writeError) {
+      fetchAllLampDataForSection(selectedSection);
+    }
+    setEdit(false); // Exit edit mode regardless
+  };
+
+  // --- Handle Confirmation (Checks for changes, opens modal) ---
+  const handleConfirmChanges = () => {
+    let changesMade = false;
+    for (const deviceIdStr in editedMaxHours) {
+      const deviceId = parseInt(deviceIdStr, 10);
+      const originalMax = lampHours[deviceId]?.currentHours || 0;
+      const editedValueStr = editedMaxHours[deviceId];
+      const editedValueNum = parseInt(editedValueStr, 10);
+      if (
+        !isNaN(editedValueNum) &&
+        editedValueNum >= 0 &&
+        editedValueNum !== originalMax
+      ) {
+        changesMade = true;
+        break; // Found a change, no need to check further
+      }
+    }
+
+    if (!changesMade) {
+      logStatus('No changes to save.');
+      setEdit(false); // Exit edit mode if no changes
+      return;
+    }
+
+    // If changes were detected, show the modal
+    setModalVisible(true);
+  };
+
+  // --- Render Functions ---
 
   const renderScrollItem = ({item}: {item: SectionSummary}) => (
     <TouchableOpacity
@@ -318,7 +326,11 @@ export const LampLifeScreen = () => {
               : COLORS.gray[200],
         },
       ]}
-      onPress={() => handleSectionSelect(item)}
+      onPress={() => {
+        if (item.id !== selectedSection?.id) {
+          setSelectedSection(item);
+        }
+      }}
       disabled={loading}>
       <Text
         style={[
@@ -335,20 +347,22 @@ export const LampLifeScreen = () => {
     </TouchableOpacity>
   );
 
-  // Render grid item (displays device card, input reflects global value)
   const renderGridItem = ({item}: {item: any}) => {
-    // For devices with ID > 4, we'll still show them but with static data or placeholder
-    // Map any device ID above 4 to use data from lamps 1-4 since we only have 4 UV lamps
-    const lampIndex = Math.min(4, item.id);
+    const deviceId = item.id;
+    const isMonitoredLamp = deviceId >= 1 && deviceId <= 4;
 
-    // Get the device's lamp hours
-    const hours =
-      item.id <= 4
-        ? lampHours[lampIndex] || {current: 0, max: currentSetpoint || 5000}
-        : {current: 0, max: currentSetpoint || 5000}; // Default for devices 5-6
+    const hours = lampHours[deviceId] || {currentHours: 0};
+    const editedValueStr = editedMaxHours[deviceId];
 
-    // For devices 5-6, add note in the UI
-    const isHigherDevice = item.id > 4;
+    const displayMaxHoursStr = edit
+      ? editedValueStr !== undefined
+        ? editedValueStr
+        : hours.currentHours !== null
+        ? Math.round(hours.currentHours).toString() // Show whole number
+        : '0' // Default to 0 when currentHours is null
+      : hours.currentHours !== null
+      ? Math.round(hours.currentHours).toString() // Show whole number
+      : 'N/A'; // Display 'N/A' when not in edit mode and maxHours is null
 
     return (
       <View style={styles.gridItem}>
@@ -357,104 +371,86 @@ export const LampLifeScreen = () => {
             <View style={styles.titleContainer}>
               <View style={styles.iconWrapper}>
                 <LampIcon
-                  fill={isHigherDevice ? COLORS.gray[400] : 'black'}
+                  fill={isMonitoredLamp ? 'black' : COLORS.gray[400]}
                   style={styles.icon}
                 />
               </View>
-
               <Text style={styles.titleInputReadOnly}>{item.name}</Text>
             </View>
 
             <TextInput
               style={[
                 styles.daysLeftInput,
-                focusedInputId === item.id && styles.focusedInput,
-                isHigherDevice && {opacity: 0.7},
+                focusedInputId === deviceId && styles.focusedInput,
+                !isMonitoredLamp && {opacity: 0.5},
               ]}
-              onFocus={() => setFocusedInputId(item.id)}
-              onBlur={() => setFocusedInputId(null)}
-              // Display the current value being edited (newValue) or the max hours
-              value={edit ? newValue : hours.max.toString()}
-              editable={edit}
-              placeholder="Hours"
-              onChangeText={handleInputChange} // Use unified handler
-              keyboardType="numeric"
-              maxLength={4} // Max 8000
-              returnKeyType="done"
-              onSubmitEditing={() => {
-                // Basic validation on submit
-                const numVal = parseInt(newValue, 10);
-                if (isNaN(numVal) || numVal > 8000 || numVal < 0) {
-                  setNewValue(hours.max.toString()); // Revert to hours.max on invalid
+              value={displayMaxHoursStr}
+              editable={edit && isMonitoredLamp && !loading}
+              placeholder="Max Hrs"
+              placeholderTextColor={COLORS.gray[600]}
+              keyboardType="decimal-pad"
+              onChangeText={text => {
+                const numericText = text.replace(/[^0-9.]/g, ''); // Allow only numbers and a single decimal point
+                if (numericText.length <= 10) {
+                  handleInputChange(deviceId, numericText);
                 }
               }}
+              onFocus={() => setFocusedInputId(deviceId)}
+              onBlur={() => setFocusedInputId(null)}
+              returnKeyType="done"
             />
-
-            <View style={{marginTop: 10, alignItems: 'center'}}>
-              <Text
-                style={{
-                  fontSize: 16,
-                  fontWeight: 'bold',
-                  color: isHigherDevice ? COLORS.gray[400] : COLORS.gray[800],
-                }}>
-                Current Hours: {Math.floor(hours.current)}
-              </Text>
-              {isHigherDevice ? (
-                <Text
-                  style={{fontSize: 12, color: COLORS.gray[400], marginTop: 2}}>
-                  (Not monitored)
-                </Text>
-              ) : (
-                <Text
-                  style={{fontSize: 12, color: COLORS.gray[600], marginTop: 2}}>
-                  Device ID: {item.id} (Lamp {lampIndex})
-                </Text>
-              )}
-            </View>
           </View>
         </View>
       </View>
     );
   };
 
-  // --- Main Return ---
+  // --- Main Return JSX ---
   return (
     <Layout>
+      {/* Loading Overlay (Keep for visual feedback) */}
       {loading && (
         <View style={styles.loadingOverlay}>
           <ActivityIndicator size="large" color={COLORS.teal[500]} />
         </View>
       )}
 
+      {/* Status Message (Keep, styled absolutely) */}
       {statusMessage ? (
         <View style={styles.statusMessageContainer}>
           <Text style={styles.statusMessageText}>{statusMessage}</Text>
         </View>
       ) : null}
 
+      {/* Confirmation Modal (Restored) */}
       <PopupModal
         visible={modalVisible}
-        onConfirm={handleConfirmChanges} // Use updated handler
-        onClose={() => setModalVisible(false)}
+        onConfirm={executeSaveChanges}
+        onClose={() => {
+          setModalVisible(false);
+        }}
         title="Confirmation needed"
         Icon={CheckIcon}>
         <View style={styles.modalContent}>
           <View style={styles.modalIconWrapper}>
             <LampIcon fill={COLORS.gray[600]} width={40} height={40} />
           </View>
-          <Text style={styles.modalTitle}>Update Lamp Life Setpoint?</Text>
+          <Text style={styles.modalTitle}>Update Lamp Life?</Text>
           <Text style={styles.modalSubText}>
-            Are you sure you want to do this action? This can't be undone.
+            Are you sure you want to save the changes to the lamp life hours?
           </Text>
         </View>
       </PopupModal>
 
+      {/* Original Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Settings</Text>
         <CustomTabBar />
       </View>
 
+      {/* Original Main Container */}
       <View style={styles.container}>
+        {/* Left Side Scroll List */}
         <View style={styles.leftContainer}>
           <View style={styles.scrollContainer}>
             {sections.length > 0 ? (
@@ -463,7 +459,7 @@ export const LampLifeScreen = () => {
                 renderItem={renderScrollItem}
                 keyExtractor={item => item.id.toString()}
                 showsVerticalScrollIndicator={false}
-                extraData={selectedSection?.id}
+                extraData={selectedSection?.id || null}
               />
             ) : !loading ? (
               <View style={styles.noSectionsContainer}>
@@ -473,67 +469,60 @@ export const LampLifeScreen = () => {
           </View>
         </View>
 
+        {/* Right Side Grid */}
         <View style={styles.gridContainer}>
-          {
-            selectedSection && devices.length > 0 ? (
-              <FlatList
-                key={isPortrait ? 'portrait-lamp' : 'landscape-lamp'}
-                numColumns={isPortrait ? 1 : 3} // Original columns
-                data={devices} // Use devices state
-                renderItem={renderGridItem}
-                keyExtractor={item => `device-${item.id}`}
-                columnWrapperStyle={
-                  isPortrait ? null : styles.gridColumnWrapper
-                }
-                contentContainerStyle={styles.gridContentContainer}
-                showsVerticalScrollIndicator={false}
-                extraData={
-                  edit || newValue || currentSetpoint || focusedInputId
-                } // Ensure re-render
-              />
-            ) : !loading ? (
-              <View style={styles.noSectionsContainer}>
-                <Text style={styles.noSectionsText}>
-                  {selectedSection ? 'No devices found.' : 'Select a section.'}
-                </Text>
-              </View>
-            ) : null /* Show nothing while initially loading sections/devices */
-          }
+          {selectedSection && devices.length > 0 ? (
+            <FlatList
+              key={isPortrait ? 'portrait-lamp' : 'landscape-lamp'}
+              numColumns={isPortrait ? 1 : 3}
+              data={devices}
+              renderItem={renderGridItem}
+              keyExtractor={item => `device-${item.id}`}
+              columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
+              contentContainerStyle={styles.gridContentContainer}
+              showsVerticalScrollIndicator={false}
+              extraData={{
+                edit,
+                lampHours,
+                editedMaxHours,
+                focusedInputId,
+                loading,
+              }}
+            />
+          ) : !loading ? (
+            <View style={styles.noSectionsContainer}>
+              <Text style={styles.noSectionsText}>
+                {selectedSection ? 'No devices found.' : 'Select a section.'}
+              </Text>
+            </View>
+          ) : null}
         </View>
       </View>
 
+      {/* Original Footer with Buttons */}
       <View style={styles.footer}>
         {edit ? (
           <>
             <TouchableOpacity
-              style={[styles.cancelButton, {opacity: loading ? 0.5 : 1}]} // Use cancelButton style
-              onPress={() => {
-                setEdit(false);
-                setNewValue(currentSetpoint?.toString() ?? ''); // Reset input
-              }}
+              style={[styles.cancelButton, {opacity: loading ? 0.5 : 1}]}
+              onPress={handleCancel}
               disabled={loading}>
               <CloseIcon fill={COLORS.gray[600]} width={24} height={24} />
               <Text style={styles.buttonText}>Cancel</Text>
             </TouchableOpacity>
-
             <TouchableOpacity
-              style={[
-                styles.saveButton, // Use saveButton style
-                // Remove specific background/border overrides, keep opacity
-                {opacity: loading ? 0.5 : 1},
-              ]}
-              onPress={() => setModalVisible(true)}
+              style={[styles.saveButton, {opacity: loading ? 0.5 : 1}]}
+              onPress={handleConfirmChanges}
               disabled={loading}>
               <CheckIcon2 fill={COLORS.good[600]} width={30} height={30} />
               <Text style={styles.buttonText}>Save Changes</Text>
             </TouchableOpacity>
           </>
         ) : (
-          /* Edit Button */
           <TouchableOpacity
             style={[styles.editButton, {opacity: loading ? 0.5 : 1}]}
-            onPress={() => setEdit(true)}
-            disabled={loading}>
+            onPress={handleEdit}
+            disabled={!selectedSection || loading}>
             <EditIcon fill={COLORS.gray[600]} width={24} height={24} />
             <Text style={styles.buttonText}>Edit Lamp Life</Text>
           </TouchableOpacity>
@@ -543,14 +532,53 @@ export const LampLifeScreen = () => {
   );
 };
 
-// --- Apply provided original styles ---
+// --- Styles (Reverted to Original Structure) ---
 const styles = StyleSheet.create({
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 1000,
+  },
+  statusMessageContainer: {
+    position: 'absolute',
+    bottom: 80,
+    left: '10%',
+    right: '10%',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 20,
+    zIndex: 1100,
+    alignItems: 'center',
+  },
+  statusMessageText: {
+    color: 'white',
+    textAlign: 'center',
+    fontSize: 14,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 32,
+    paddingBottom: 16,
+  },
+  headerTitle: {
+    fontSize: 40,
+    fontWeight: '500',
+    color: COLORS.gray[800],
+  },
   container: {
     flex: 1,
     flexDirection: 'row',
     gap: 32,
     paddingLeft: 32,
-
     paddingRight: 32,
   },
   leftContainer: {
@@ -564,56 +592,40 @@ const styles = StyleSheet.create({
     backgroundColor: 'white',
     padding: 24,
     borderRadius: 30,
-    boxShadow: '0px 4px 10px rgba(0, 0, 0, 0.1)', // Translated below
+    boxShadow: '0px 4px 10px rgba(0, 0, 0, 0.1)',
   },
   scrollItem: {
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderLeftWidth: 5,
-    // borderLeftColor set inline
   },
   scrollItemText: {
     color: COLORS.gray[700],
     fontSize: 21,
     fontWeight: '500',
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 32, // Keep consistent padding
-    paddingBottom: 16, // Keep padding below header
-  },
-  headerTitle: {
-    fontSize: 40, // Keep consistent size
-    fontWeight: '500',
-    color: COLORS.gray[800], // Ensure color is defined
-  },
   gridContainer: {
     flex: 1,
-    paddingVertical: 16, // Keep vertical padding
+    paddingVertical: 16,
   },
   gridContentContainer: {
     gap: 16,
     flexGrow: 1,
-    // Removed paddingHorizontal/Vertical as it's on gridContainer
   },
   gridItem: {
     flex: 1,
     backgroundColor: 'white',
     borderRadius: 30,
     padding: 24,
-    boxShadow: '0px 4px 24px 0px rgba(0, 0, 0, 0.05)', // Translated below
+    boxShadow: '0px 4px 10px rgba(0, 0, 0, 0.1)',
     minHeight: 180,
+    justifyContent: 'space-between',
   },
   gridColumnWrapper: {
     gap: 16,
     justifyContent: 'space-between',
   },
   card: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 16,
     flex: 1,
   },
   cardContent: {
@@ -626,31 +638,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 16,
+    marginBottom: 16,
   },
   iconWrapper: {
     borderWidth: 1,
     borderColor: COLORS.gray[100],
     borderRadius: 1000,
     padding: 16,
-    backgroundColor: COLORS.gray[50], // Keep background
+    backgroundColor: COLORS.gray[50],
   },
   icon: {
     width: 24,
     height: 24,
   },
-  titleInput: {
-    // Style for the device name text (appears readonly now)
-    fontSize: 24,
-    fontWeight: '600',
-    color: COLORS.gray[800], // Use consistent color
-    flex: 1, // Allow text to take space
-  },
   titleInputReadOnly: {
-    // Style for displaying name when not editing
     fontSize: 24,
     fontWeight: '600',
     color: COLORS.gray[800],
-    paddingVertical: 5, // Add some padding to align roughly with input
     flexShrink: 1,
   },
   daysLeftInput: {
@@ -658,30 +662,28 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: COLORS.gray[700],
     paddingHorizontal: 16,
-    paddingVertical: 16,
+    paddingVertical: 10,
     backgroundColor: COLORS.gray[100],
     borderWidth: 1,
     borderColor: COLORS.gray[200],
-    borderRadius: 20,
+    borderRadius: 15,
     width: '100%',
-    maxHeight: 60,
+    textAlign: 'center',
   },
-
   focusedInput: {
     borderColor: COLORS.teal[500],
-    backgroundColor: 'white', // Add white background on focus
+    backgroundColor: 'white',
+    borderWidth: 2,
   },
   footer: {
     width: '100%',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 16, // Use vertical padding consistent with others
-    paddingHorizontal: 32, // Use horizontal padding
+    paddingVertical: 16,
+    paddingHorizontal: 32,
     gap: 16,
     flexDirection: 'row',
-    // Removed borderTop from previous merge
   },
-  // Using the consistent button styles from other tabs
   editButton: {
     paddingHorizontal: 32,
     paddingVertical: 16,
@@ -721,14 +723,21 @@ const styles = StyleSheet.create({
   buttonText: {
     fontSize: 24,
     fontWeight: '600',
-    color: COLORS.gray[700],
+    color: COLORS.gray[800],
   },
-  // Modal styles from provided snippet + centering logic
-  modalContent: {
+  noSectionsContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingBottom: 20,
+    opacity: 0.6,
+  },
+  noSectionsText: {
+    color: COLORS.gray[600],
+    fontSize: 16,
+  },
+  modalContent: {
+    alignItems: 'center',
+    paddingVertical: 20,
   },
   modalIconWrapper: {
     borderWidth: 1,
@@ -738,10 +747,6 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     backgroundColor: COLORS.gray[50],
   },
-  modalIcon: {
-    width: 50,
-    height: 50,
-  },
   modalTitle: {
     fontSize: 24,
     fontWeight: '600',
@@ -750,99 +755,25 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   modalSubText: {
-    fontSize: 20,
-    color: COLORS.gray[600],
-    width: '60%',
-    textAlign: 'center',
-    marginBottom: 24,
-  },
-  // Styles for modal list (IP Address screen? Seems out of place here but included from snippet)
-  modalContentContainer: {
-    gap: 16,
-  },
-  modalItem: {
-    flexDirection: 'column',
-    gap: 12,
-    borderWidth: 1,
-    borderColor: COLORS.gray[200],
-    borderRadius: 12,
-    padding: 12,
-    width: '30%', // This might need adjustment based on context
-  },
-  modalItemHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  modalItemTitle: {
     fontSize: 18,
-    fontWeight: '600',
-    flex: 1,
-    minWidth: 100,
-    maxWidth: '60%',
-    textAlign: 'left',
-  },
-  modalItemText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: COLORS.gray[700],
-    flex: 1,
-    minWidth: 60,
-    textAlign: 'left',
-  },
-  modalItemContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 24,
-  },
-  cancelIconWrapper: {
-    borderRadius: 1000,
-    padding: 6,
-    backgroundColor: COLORS.error[50],
-    borderWidth: 1,
-    borderColor: COLORS.error[100],
-  },
-  modalColumnWrapper: {
-    gap: 16,
-  },
-  // Utility Styles (Keep from current)
-  loadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(255, 255, 255, 0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 1000,
-  },
-  statusMessageContainer: {
-    position: 'absolute',
-    bottom: 80, // Position above footer buttons
-    left: '10%',
-    right: '10%',
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 20,
-    zIndex: 1100,
-    alignItems: 'center',
-  },
-  statusMessageText: {
-    color: 'white',
-    textAlign: 'center',
-    fontSize: 14,
-  },
-  noSectionsContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    opacity: 0.6, // Keep opacity
-  },
-  noSectionsText: {
     color: COLORS.gray[600],
+    width: '70%',
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  currentHoursValue: {
     fontSize: 16,
+    fontWeight: 'bold',
+    color: COLORS.gray[800],
+    textAlign: 'center',
+  },
+  currentHoursDisplayContainer: {
+    marginTop: 10,
+    alignItems: 'center',
+  },
+  deviceIdText: {
+    fontSize: 12,
+    color: COLORS.gray[600],
   },
 });
 

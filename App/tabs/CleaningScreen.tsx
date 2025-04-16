@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback} from 'react'; // Added useCallback
+import React, {useState, useEffect, useCallback} from 'react';
 import {
   View,
   Text,
@@ -6,10 +6,11 @@ import {
   StyleSheet,
   FlatList,
   TextInput,
-  ActivityIndicator, // Added ActivityIndicator
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import Layout from '../../components/Layout';
-import {COLORS} from '../../constants/colors'; // Use your colors path
+import {COLORS} from '../../constants/colors';
 import {
   CheckIcon,
   CheckIcon2,
@@ -17,243 +18,238 @@ import {
   CloseIcon,
   EditIcon,
   RepeatIcon,
-} from '../../icons'; // Use your icons path
+} from '../../icons';
 import CustomTabBar from '../../components/CustomTabBar';
 import PopupModal from '../../components/PopupModal';
-import {getSectionsWithStatus} from '../../utils/db'; // Use your DB utils path
-
-// --- IMPORT NEW MODBUS FUNCTIONS ---
+import {getSectionsWithStatus} from '../../utils/db';
 import {
-  setCleaningHours, // Writes float32 via FC16
-  readCleaningHoursSetpoint, // Reads float32 via FC03
-} from '../../utils/modbus'; // Use your modbus utils path
+  readCleaningHoursSetpoint,
+  setCleaningHoursSetpoint,
+} from '../../utils/modbus';
 
-// Define SectionSummary type
 interface SectionSummary {
   id: number;
   name: string;
   ip: string | null;
-  // cleaningDays is likely not the setpoint, removing it from main list summary
   working: boolean;
 }
 
 const CleaningScreen = () => {
-  const [sections, setSections] = useState<SectionSummary[]>([]); // State to store sections summary
+  const [sections, setSections] = useState<SectionSummary[]>([]);
   const [selectedSection, setSelectedSection] = useState<SectionSummary | null>(
     null,
-  ); // State for the currently selected section
-  const [currentSetpoint, setCurrentSetpoint] = useState<number | null>(null); // State for the value read from PLC
+  );
+  const [currentSetpoint, setCurrentSetpoint] = useState<number | null>(null);
   const [edit, setEdit] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
-  const [newValue, setNewValue] = useState<string>(''); // Input value state (string)
+  const [newValue, setNewValue] = useState<string>('');
   const [statusMessage, setStatusMessage] = useState('');
-  const [loading, setLoading] = useState(false); // Loading state for fetching/setting
+  const [loading, setLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
-  // --- Status Log Function ---
   const logStatus = useCallback((message: string, isError = false) => {
     console.log(`[Cleaning Screen Status] ${message}`);
     setStatusMessage(message);
-    setTimeout(() => setStatusMessage(''), isError ? 6000 : 4000);
-  }, []); // No dependencies needed if not using section context here
+    const timeoutId = setTimeout(
+      () => setStatusMessage(''),
+      isError ? 6000 : 4000,
+    );
+    return () => clearTimeout(timeoutId);
+  }, []);
 
-  // --- Fetch Sections List ---
   useEffect(() => {
     setLoading(true);
+    let isMounted = true;
     getSectionsWithStatus(fetchedSections => {
+      if (!isMounted) return;
       const formattedSections = fetchedSections
-        .filter(section => !!section.ip) // Only include sections with an IP
+        .filter(section => !!section.ip)
         .map(section => ({
           id: section.id!,
           name: section.name,
           ip: section.ip,
           working: section.working,
-          // Removed cleaningDays here, as it's likely not the setpoint
         }));
       setSections(formattedSections);
 
-      // Select the first section automatically if available
       if (formattedSections.length > 0) {
-        setSelectedSection(formattedSections[0]);
+        if (!selectedSection) {
+          setSelectedSection(formattedSections[0]);
+        }
       } else {
-        setSelectedSection(null); // No sections available
         logStatus('No sections with IP addresses found.', true);
-      }
-      setLoading(false);
-    });
-  }, [logStatus]); // Added logStatus dependency
-
-  // --- Fetch Current Setpoint when selectedSection changes ---
-  useEffect(() => {
-    if (selectedSection && selectedSection.ip) {
-      setLoading(true);
-      setCurrentSetpoint(null); // Reset while fetching
-      setNewValue(''); // Clear input field
-      logStatus(`Fetching cleaning setpoint for ${selectedSection.name}...`);
-
-      const timeout = setTimeout(() => {
+        setSelectedSection(null);
+        setCurrentSetpoint(null);
+        setNewValue('');
         setLoading(false);
-        logStatus(
-          `Timeout fetching setpoint for ${selectedSection.name}.`,
-          true,
-        );
-        setCurrentSetpoint(0); // Set a default or indicate error state
-      }, 5000);
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, [logStatus, selectedSection]);
 
-      // Use NEW readCleaningHoursSetpoint function
-      readCleaningHoursSetpoint(
-        selectedSection.ip,
-        502,
-        msg => {},
-        value => {
-          clearTimeout(timeout);
-          setLoading(false);
-          if (value !== null) {
-            logStatus(
-              `Current setpoint for ${selectedSection.name}: ${value.toFixed(
-                0,
-              )} hours`,
-            );
-            setCurrentSetpoint(value);
-            setNewValue(value.toString()); // Pre-fill input with current value
-          } else {
-            logStatus(
-              `Failed to read setpoint for ${selectedSection.name}.`,
-              true,
-            );
-            setCurrentSetpoint(0); // Set a default or indicate error state
-            setNewValue('0');
-          }
-        },
-      );
-    } else {
-      // Clear setpoint if no section is selected or no IP
+  // Ensure the TextInput shows only decimal values
+  const fetchCurrentSetpoint = useCallback(async () => {
+    if (!selectedSection || !selectedSection.ip) {
       setCurrentSetpoint(null);
       setNewValue('');
+      setLoading(false);
+      if (selectedSection) {
+        logStatus(`Section '${selectedSection.name}' has no IP address.`, true);
+      }
+      return;
     }
-  }, [selectedSection, logStatus]); // Rerun when selectedSection changes
 
-  // --- Handle Modal Confirmation (Save Changes) ---
-  const handleSaveChanges = () => {
+    setLoading(true);
+    setCurrentSetpoint(null);
+    setNewValue('');
+    logStatus(`Fetching cleaning setpoint for ${selectedSection.name}...`);
+
+    try {
+      const value = await readCleaningHoursSetpoint(selectedSection.ip, 502);
+      console.log(`[Debug] Fetched cleaning hours setpoint: ${value}`);
+      const formattedValue = Math.round(value).toString(); // Round to whole number
+      setCurrentSetpoint(parseFloat(formattedValue));
+      setNewValue(formattedValue); // Ensure the TextInput shows the whole number
+      logStatus(`Fetched cleaning hours setpoint: ${formattedValue} hours`);
+    } catch (error: any) {
+      console.error(
+        `[Debug] Error fetching cleaning hours setpoint: ${error.message}`,
+      );
+      const errorMsg = `Error fetching setpoint for ${selectedSection.name}: ${error.message}`;
+      logStatus(errorMsg, true);
+      setCurrentSetpoint(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedSection, logStatus]);
+
+  useEffect(() => {
+    fetchCurrentSetpoint();
+  }, [fetchCurrentSetpoint]);
+
+  const handleSaveChanges = async () => {
     if (!selectedSection || !selectedSection.ip) {
       logStatus('No section selected or section has no IP.', true);
       setModalVisible(false);
       return;
     }
 
-    const numericNewValue = parseFloat(newValue); // Convert input string to number
-    if (isNaN(numericNewValue) || numericNewValue < 0) {
+    const numericNewValue = parseInt(newValue, 10);
+    if (
+      isNaN(numericNewValue) ||
+      numericNewValue < 0 ||
+      numericNewValue > 65535
+    ) {
       logStatus(
-        'Invalid input. Please enter a positive number for hours.',
+        'Invalid Input: Please enter a valid number between 0 and 65535.',
         true,
       );
-      // Optionally shake the input or provide visual feedback
+      Alert.alert(
+        'Invalid Input',
+        'Please enter a valid number between 0 and 65535.',
+      );
       return;
     }
 
-    setModalVisible(false); // Close confirmation modal
+    setModalVisible(false);
+    setIsSaving(true);
     setLoading(true);
     logStatus(
-      `Setting cleaning hours for ${
-        selectedSection.name
-      } to ${numericNewValue.toFixed(0)}...`,
+      `Setting cleaning hours for ${selectedSection.name} to ${numericNewValue}...`,
     );
 
-    // Use NEW setCleaningHours function (expects float, uses FC16)
-    setCleaningHours(
-      selectedSection.ip, // IP address
-      502, // Port
-      numericNewValue, // The new value (as a number/float)
-      msg => {
-        logStatus(`Modbus update: ${msg}`);
-        setLoading(false); // Stop loading after Modbus attempt
+    try {
+      await setCleaningHoursSetpoint(
+        selectedSection.ip,
+        502,
+        numericNewValue,
+        logStatus,
+      );
 
-        // Check if Modbus reported success (adjust keywords if needed)
-        if (
-          !msg.toLowerCase().includes('error') &&
-          !msg.toLowerCase().includes('failed') &&
-          !msg.toLowerCase().includes('exception')
-        ) {
-          logStatus(
-            `Cleaning hours setpoint updated successfully for ${selectedSection.name}.`,
-          );
-          // Update local state to reflect the change
-          setCurrentSetpoint(numericNewValue);
-          // No need to update sections list state for this value unless your DB structure links it
-
-          // Optional: Update DB if you store this *setpoint* value there
-          // updateSection(...); // Be careful what you update in the DB
-
-          setEdit(false); // Exit edit mode on success
-        } else {
-          logStatus(
-            `Failed to set cleaning hours for ${selectedSection.name}.`,
-            true,
-          );
-          // Optionally revert input field to currentSetpoint if desired
-          // setNewValue(currentSetpoint?.toString() ?? '');
-        }
-      },
-    );
+      logStatus(
+        `Cleaning hours setpoint updated successfully for ${selectedSection.name}.`,
+      );
+      setCurrentSetpoint(numericNewValue);
+      setEdit(false);
+      Alert.alert('Success', 'Setpoint updated successfully.');
+    } catch (error: any) {
+      const errorMsg = `Failed to set cleaning hours for ${selectedSection.name}: ${error.message}`;
+      logStatus(errorMsg, true);
+      Alert.alert('Error', errorMsg);
+    } finally {
+      setIsSaving(false);
+      setLoading(false);
+    }
   };
 
-  // --- Render Functions --- (Using original structure and styles)
-
-  // Render item for the left scroll list
-  const renderScrollItem = (
-    {item}: {item: SectionSummary}, // Use SectionSummary
-  ) => (
+  const renderScrollItem = ({item}: {item: SectionSummary}) => (
     <TouchableOpacity
       onPress={() => {
-        if (item.id !== selectedSection?.id) {
-          // Prevent re-selecting same section unnecessarily
+        if (item.id !== selectedSection?.id && !isSaving) {
           setSelectedSection(item);
-          setEdit(false); // Exit edit mode when switching sections
+          setEdit(false);
         }
       }}
       style={[
-        styles.scrollItem, // Original style
+        styles.scrollItem,
         {
           borderLeftColor:
             item.id === selectedSection?.id
               ? COLORS.teal[500]
               : COLORS.gray[200],
-        }, // Original logic
+          opacity: isSaving ? 0.6 : 1,
+        },
       ]}
-      disabled={loading} // Disable while loading
-    >
+      disabled={loading || isSaving}>
       <Text
         style={[
-          styles.scrollItemText, // Original style
+          styles.scrollItemText,
           {
             color:
               item.id === selectedSection?.id
                 ? COLORS.teal[500]
                 : COLORS.gray[800],
-          }, // Original logic (used gray[800] instead of 700)
+          },
         ]}>
         {item.name}
       </Text>
     </TouchableOpacity>
   );
 
-  // --- Main Return --- (Using original structure)
   return (
     <Layout>
-      {loading && (
+      {(loading || isSaving) && (
         <View style={styles.loadingOverlay}>
           <ActivityIndicator size="large" color={COLORS.teal[500]} />
+          <Text style={styles.loadingText}>
+            {isSaving ? 'Saving...' : 'Loading...'}
+          </Text>
         </View>
       )}
 
       {statusMessage ? (
         <View style={styles.statusMessageContainer}>
-          <Text style={styles.statusMessageText}>{statusMessage}</Text>
+          <Text
+            style={[
+              styles.statusMessageText,
+              {
+                color:
+                  statusMessage.includes('Error') ||
+                  statusMessage.includes('Failed')
+                    ? 'red'
+                    : 'green',
+              },
+            ]}>
+            {statusMessage}
+          </Text>
         </View>
       ) : null}
 
       <PopupModal
         visible={modalVisible}
-        onConfirm={handleSaveChanges} // Call updated handler
+        onConfirm={handleSaveChanges}
         onClose={() => setModalVisible(false)}
         title="Confirmation needed"
         Icon={CheckIcon}>
@@ -263,7 +259,8 @@ const CleaningScreen = () => {
           </View>
           <Text style={styles.modalTitle}>Update Cleaning Hours?</Text>
           <Text style={styles.modalSubText}>
-            Are you sure you want to do this action? This can't be undone.
+            Set cleaning hours for '{selectedSection?.name}' to{' '}
+            <Text style={{fontWeight: 'bold'}}>{newValue}</Text> hours?
           </Text>
         </View>
       </PopupModal>
@@ -276,180 +273,252 @@ const CleaningScreen = () => {
       <View style={styles.container}>
         <View style={styles.leftContainer}>
           <View style={styles.scrollContainer}>
-            {
-              sections.length > 0 ? (
-                <FlatList
-                  data={sections}
-                  renderItem={renderScrollItem}
-                  keyExtractor={item => item.id.toString()}
-                  showsVerticalScrollIndicator={false}
-                  extraData={selectedSection?.id} // Ensure re-render on selection change
-                />
-              ) : !loading ? ( // Show message if not loading and no sections
-                <View style={styles.noSectionsContainer}>
-                  <Text style={styles.noSectionsText}>No sections found.</Text>
-                  <Text style={styles.noSectionsText}>
-                    Ensure sections have IP addresses.
-                  </Text>
-                </View>
-              ) : null /* Show nothing while initially loading sections */
-            }
+            {sections.length > 0 ? (
+              <FlatList
+                data={sections}
+                renderItem={renderScrollItem}
+                keyExtractor={item => item.id.toString()}
+                showsVerticalScrollIndicator={false}
+                extraData={`${selectedSection?.id}-${isSaving}`}
+              />
+            ) : !loading ? (
+              <View style={styles.noSectionsContainer}>
+                <Text style={styles.noSectionsText}>No sections found.</Text>
+                <Text style={styles.noSectionsText}>
+                  Ensure sections have IP addresses.
+                </Text>
+              </View>
+            ) : null}
           </View>
         </View>
 
         <View style={styles.rightContainer}>
-          {
-            selectedSection ? ( // Only show card if a section is selected
-              <View style={styles.gridItem}>
-                <View style={styles.card}>
-                  <View style={styles.cardHeader}>
-                    <View style={styles.cardIconWrapper}>
-                      <CleaningIcon fill={'black'} style={styles.cardIcon} />
-                    </View>
-                    <Text style={styles.cardTitle}>
-                      Cleaning Hours Setpoint
-                    </Text>
+          {selectedSection ? (
+            <View style={styles.gridItem}>
+              <View style={styles.card}>
+                <View style={styles.cardHeader}>
+                  <View style={styles.cardIconWrapper}>
+                    <CleaningIcon
+                      fill={COLORS.gray[600]}
+                      style={styles.cardIcon}
+                    />
                   </View>
-                  <TextInput
-                    style={[
-                      styles.cardInput, // Original style
-                      !edit && styles.cardInputDisabled, // Style for non-editable state
-                    ]}
-                    placeholder="---" // Placeholder if value is null
-                    editable={edit && !loading} // Editable only in edit mode and not loading
-                    value={newValue} // Bind to newValue state (string)
-                    keyboardType="numeric"
-                    onChangeText={setNewValue} // Update newValue state directly
-                    maxLength={5} // Limit input length
-                  />
+                  <Text style={styles.cardTitle}>Cleaning Hours Setpoint</Text>
                 </View>
+                <TextInput
+                  style={[styles.cardInput, !edit && styles.cardInputDisabled]}
+                  placeholder="---"
+                  editable={edit && !isSaving && !loading}
+                  value={newValue}
+                  keyboardType="numeric"
+                  onChangeText={setNewValue}
+                />
               </View>
-            ) : !loading ? ( // Show message if no section selected (and not loading)
-              <View style={styles.noSectionsContainer}>
-                <Text style={styles.noSectionsText}>Select a section</Text>
-              </View>
-            ) : null /* Show nothing while initially loading sections */
-          }
+            </View>
+          ) : !loading ? (
+            <View style={styles.noSectionsContainer}>
+              <Text style={styles.noSectionsText}>Select a section</Text>
+            </View>
+          ) : null}
         </View>
       </View>
 
       <View style={styles.footer}>
         {edit ? (
-          <>
+          <View style={styles.footerButtonsContainer}>
             <TouchableOpacity
-              style={[styles.cancelButton, {opacity: loading ? 0.5 : 1}]} // Use cancelButton style
+              style={[
+                styles.cancelButton,
+                {opacity: loading || isSaving ? 0.5 : 1},
+              ]}
               onPress={() => {
                 setEdit(false);
-                setNewValue(currentSetpoint?.toString() ?? ''); // Reset input
+                setNewValue(currentSetpoint?.toString() ?? '');
               }}
-              disabled={loading}>
+              disabled={loading || isSaving}>
               <CloseIcon fill={COLORS.gray[600]} width={24} height={24} />
               <Text style={styles.buttonText}>Cancel</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[styles.saveButton, {opacity: loading ? 0.5 : 1}]} // Use saveButton style
+              style={[
+                styles.saveButton,
+                {opacity: loading || isSaving ? 0.5 : 1},
+              ]}
               onPress={() => setModalVisible(true)}
-              disabled={loading}>
+              disabled={
+                loading ||
+                isSaving ||
+                !selectedSection ||
+                newValue === (currentSetpoint?.toString() ?? '')
+              }>
               <CheckIcon2 fill={COLORS.good[600]} width={30} height={30} />
-              <Text style={styles.buttonText}>Save changes</Text>
+              <Text style={[styles.buttonText]}>Save changes</Text>
             </TouchableOpacity>
-          </>
+          </View>
         ) : (
-          /* Edit Button */
-          <TouchableOpacity
-            style={[
-              styles.editButton,
-              {opacity: loading || !selectedSection ? 0.5 : 1},
-            ]} // Use editButton style
-            onPress={() => setEdit(true)}
-            disabled={loading || !selectedSection}>
-            <EditIcon fill={COLORS.gray[600]} width={24} height={24} />
-            <Text style={styles.buttonText}>Edit Cleaning Hours</Text>
-          </TouchableOpacity>
+          <View style={styles.footerButtonsContainer}>
+            <TouchableOpacity
+              style={[
+                styles.editButton,
+                {
+                  opacity:
+                    loading || isSaving
+                      ? // !selectedSection ||
+                        // currentSetpoint === null
+                        0.5
+                      : 1,
+                },
+              ]}
+              onPress={() => setEdit(true)}
+              disabled={
+                loading ||
+                isSaving ||
+                !selectedSection ||
+                currentSetpoint === null
+              }>
+              <EditIcon fill={COLORS.gray[600]} width={24} height={24} />
+              <Text style={styles.buttonText}>Edit Cleaning Hours</Text>
+            </TouchableOpacity>
+          </View>
         )}
       </View>
     </Layout>
   );
 };
 
-// --- Styles ---
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    // backgroundColor: '#fff', // Set by Layout presumably
-    flexDirection: 'row',
-    gap: 32,
-    paddingVertical: 16,
-    paddingHorizontal: 32,
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
   },
-  leftContainer: {
-    width: 250,
-    flexDirection: 'column',
-    gap: 12,
+  loadingText: {
+    marginTop: 10,
+    fontSize: 16,
+    color: COLORS.gray[700],
   },
-  scrollContainer: {
-    flex: 1,
-    backgroundColor: 'white',
-    paddingVertical: 16, // Adjusted padding
-    paddingHorizontal: 8, // Adjusted padding
-    borderRadius: 20, // Adjusted radius
-    boxShadow: '0px 4px 10px rgba(0, 0, 0, 0.1)',
+  statusMessageContainer: {
+    paddingVertical: 8,
+    paddingHorizontal: 15,
+    backgroundColor: COLORS.gray[100],
+    alignItems: 'center',
+    position: 'absolute',
+    bottom: 80,
+    left: '10%',
+    right: '10%',
+    borderRadius: 20,
+    zIndex: 5,
   },
-  scrollItem: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderLeftWidth: 4, // Thinner border
-    borderRadius: 4, // Slight rounding of selection indicator area
-    marginBottom: 4, // Add gap between items
-  },
-  scrollItemText: {
-    // color: COLORS.gray[700], // Color set inline
-    fontSize: 18, // Slightly smaller font
+  statusMessageText: {
+    fontSize: 14,
     fontWeight: '500',
+    textAlign: 'center',
+  },
+  modalContent: {
+    alignItems: 'center',
+    padding: 10,
+  },
+  modalIconWrapper: {
+    marginBottom: 15,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    color: COLORS.gray[800],
+  },
+  modalSubText: {
+    fontSize: 14,
+    textAlign: 'center',
+    color: COLORS.gray[600],
+    marginBottom: 10,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 32,
-    marginBottom: 16, // Add margin below header
+    paddingVertical: 16,
   },
   headerTitle: {
-    fontSize: 40, // Match ContactScreen size
+    fontSize: 40,
     fontWeight: '500',
-    color: COLORS.gray[800], // Added color
+    color: COLORS.gray[800],
+  },
+  container: {
+    flex: 1,
+    flexDirection: 'row',
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+    gap: 32,
+  },
+  leftContainer: {
+    width: 250,
   },
   rightContainer: {
     flex: 1,
-    justifyContent: 'center', // Center vertically
-    alignItems: 'center', // Center horizontally
-    // Removed paddingTop
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  scrollContainer: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 16,
+    paddingHorizontal: 8,
+    borderRadius: 20,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 2},
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  scrollItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderLeftWidth: 4,
+    borderRadius: 4,
+    marginBottom: 4,
+  },
+  scrollItemText: {
+    fontSize: 18,
+    fontWeight: '500',
   },
   noSectionsContainer: {
-    // Style for placeholder text
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     opacity: 0.6,
+    padding: 20,
   },
   noSectionsText: {
     fontSize: 16,
     color: COLORS.gray[600],
+    textAlign: 'center',
+    marginBottom: 5,
   },
   gridItem: {
-    // Container for the single card
     width: '100%',
-    backgroundColor: 'white',
-    borderRadius: 20, // Adjusted radius
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
     padding: 24,
-    boxShadow: '0px 4px 24px 0px rgba(0, 0, 0, 0.05)',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 4},
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
   },
   card: {
-    flexDirection: 'row', // Keep original
+    flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center', // Vertically center items in card
-    gap: 24, // Adjusted gap
+    alignItems: 'center',
+    gap: 24,
   },
   cardHeader: {
     flexDirection: 'row',
@@ -461,47 +530,53 @@ const styles = StyleSheet.create({
     borderColor: COLORS.gray[100],
     borderRadius: 1000,
     padding: 16,
-    backgroundColor: COLORS.gray[50], // Light background for icon
+    backgroundColor: COLORS.gray[50],
   },
   cardIcon: {
     width: 24,
     height: 24,
   },
   cardTitle: {
-    fontSize: 20, // Adjusted size
+    fontSize: 20,
     fontWeight: '600',
     color: COLORS.gray[800],
   },
   cardInput: {
-    fontSize: 20, // Keep size
-    fontWeight: '600', // Make input value bolder
-    color: COLORS.gray[800], // Darker text
+    fontSize: 20,
+    fontWeight: '600',
+    color: COLORS.gray[800],
     paddingHorizontal: 16,
-    paddingVertical: 12, // Adjust padding
-    backgroundColor: COLORS.gray[50], // Lighter background
+    paddingVertical: 12,
+    backgroundColor: COLORS.gray[50],
     borderWidth: 1,
     borderColor: COLORS.gray[200],
-    borderRadius: 10, // Less round
-    width: 150, // Fixed width for input
-    textAlign: 'center', // Center text in input
-    maxHeight: 60,
+    borderRadius: 10,
+    width: 150,
+    textAlign: 'center',
+    minHeight: 50,
   },
   cardInputDisabled: {
-    // Style when not editable
-    borderColor: 'transparent', // No border
-    color: COLORS.gray[700], // Regular text color
+    backgroundColor: 'transparent',
+    borderColor: 'transparent',
+    color: COLORS.gray[800],
   },
-  // --- Footer Styles (Adapted from LampLifeScreen/ContactScreen) ---
   footer: {
     width: '100%',
-    alignItems: 'center', // Center buttons horizontally
-    justifyContent: 'center', // Center buttons horizontally
-    paddingVertical: 16, // Consistent padding
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 16,
     paddingHorizontal: 32,
-    gap: 16, // Space between buttons
-    flexDirection: 'row', // Arrange buttons in a row
+    gap: 16,
+    flexDirection: 'row',
   },
-  // Base Button Style (Common properties - Reuse from LampLife)
+  footerButtonsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 16,
+    width: '100%',
+    paddingHorizontal: 16,
+  },
   baseButton: {
     paddingHorizontal: 32,
     paddingVertical: 16,
@@ -510,110 +585,49 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 16,
+    gap: 12,
   },
-  // Edit Button (Reuse from LampLife)
+  buttonText: {
+    fontSize: 24,
+    fontWeight: '600',
+    color: COLORS.gray[700],
+  },
   editButton: {
     paddingHorizontal: 32,
     paddingVertical: 16,
     borderWidth: 1,
+    borderColor: COLORS.gray[200],
     borderRadius: 50,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 16,
-    borderColor: COLORS.gray[200],
     backgroundColor: 'white',
   },
-  // Cancel Button (Reuse from LampLife)
   cancelButton: {
     paddingHorizontal: 32,
     paddingVertical: 16,
     borderWidth: 1,
+    borderColor: COLORS.gray[200],
     borderRadius: 50,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 16,
-    borderColor: COLORS.gray[200],
     backgroundColor: 'white',
   },
-  // Save Button (Reuse from LampLife)
   saveButton: {
     paddingHorizontal: 32,
     paddingVertical: 16,
     borderWidth: 1,
+    borderColor: COLORS.gray[200],
     borderRadius: 50,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 16,
-    borderColor: COLORS.gray[200],
     backgroundColor: 'white',
   },
-  // Button Text Style (Reuse from LampLife)
-  buttonText: {
-    fontSize: 24, // Consistent size
-    fontWeight: '600',
-    color: COLORS.gray[700],
-  },
-  // --- Modals (Apply ContactScreen Styles) ---
-  modalContent: {
-    flex: 1, // Use flex: 1 to allow centering within the modal space
-    justifyContent: 'center',
-    alignItems: 'center', // Center items horizontally
-    paddingBottom: 20, // Keep existing padding if needed, or adjust
-  },
-  modalIconWrapper: {
-    borderWidth: 1,
-    borderColor: COLORS.gray[100],
-    borderRadius: 1000,
-    padding: 16, // Match ContactScreen padding
-    marginBottom: 12, // Match ContactScreen margin
-  },
-  modalIcon: {
-    width: 50, // Keep size
-    height: 50,
-  },
-  modalTitle: {
-    fontSize: 24, // Match ContactScreen size
-    fontWeight: '600',
-    color: COLORS.gray[800], // Match ContactScreen color
-    marginBottom: 8, // Match ContactScreen margin
-    textAlign: 'center', // Ensure title is centered if it wraps
-  },
-  modalSubText: {
-    fontSize: 20, // Match ContactScreen size
-    color: COLORS.gray[600],
-    width: '60%', // Match ContactScreen width
-    textAlign: 'center', // Ensure text is centered
-    marginBottom: 24, // Match ContactScreen margin
-  },
-  // --- Utility ---
-  loadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(255, 255, 255, 0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 1000,
-  },
-  statusMessageContainer: {
-    position: 'absolute',
-    bottom: 20,
-    left: '10%',
-    right: '10%',
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 20,
-    zIndex: 1100,
-    alignItems: 'center',
-  },
-  statusMessageText: {color: 'white', textAlign: 'center', fontSize: 14},
 });
 
 export default CleaningScreen;

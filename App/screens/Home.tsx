@@ -3,8 +3,8 @@ import {
   View,
   Text,
   StyleSheet,
-  ViewStyle, // Keep ViewStyle
-  TextStyle, // Keep TextStyle
+  ViewStyle,
+  TextStyle,
   FlatList,
   useWindowDimensions,
   TouchableOpacity,
@@ -13,26 +13,27 @@ import {
 
 import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
-import {CheckIcon2, InfoIcon} from '../../icons'; // Keep original icons
+import {CheckIcon2, InfoIcon} from '../../icons';
 import CustomSwitch from '../../components/CustomSwitch';
-import {useNavigation} from '@react-navigation/native';
-import {
-  // getDevicesForSection, // Removed as per previous updates
-  getSectionsWithStatus,
-  updateSection,
-} from '../../utils/db'; // Adjust path if necessary
+import {useNavigation, NavigationProp} from '@react-navigation/native';
+import {getSectionsWithStatus, updateSection} from '../../utils/db';
 
-// Import the updated Modbus functions
-import {
-  toggleLamp,
-  // Other updated functions...
-} from '../../utils/modbus'; // Adjust path if necessary
+import {toggleLamp} from '../../utils/modbus';
+import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 
-// global.Buffer = Buffer; // Only if needed
+type RootStackParamList = {
+  Home: undefined;
+  Settings: undefined;
+  Section: {
+    sectionId: number;
+    sectionName: string;
+    sectionIp: string | null;
+  };
+  ContactUs: undefined;
+};
 
-// *** Using the FUNCTIONAL code from the previous response ***
 export default function Home() {
-  const navigation = useNavigation();
+  const navigation = useNavigation<NavigationProp<RootStackParamList>>();
   const {width, height} = useWindowDimensions();
   const isPortrait = height > width;
 
@@ -49,6 +50,8 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [allSectionsWorking, setAllSectionsWorking] = useState(false);
 
+  const powerStatusStore = useSectionsPowerStatusStore();
+
   const logModbusStatus = (message: string) => {
     console.log(`[Modbus Status] ${message}`);
   };
@@ -57,17 +60,20 @@ export default function Home() {
     const fetchData = async () => {
       setLoading(true);
       try {
-        await getSectionsWithStatus(sectionsData => {
-          const formattedSections = sectionsData.map(section => ({
-            id: section.id!,
-            name: section.name,
-            connected: !!section.ip,
-            working: section.working,
-            ip: section.ip || null,
-            cleaningDays: section.cleaningDays,
-          }));
-          setSections(formattedSections);
-          const connectedSections = formattedSections.filter(s => s.connected);
+        await getSectionsWithStatus(async sectionsData => {
+          const updatedSections = sectionsData.map(section => {
+            const isConnected = !!section.ip;
+            return {
+              id: section.id!,
+              name: section.name,
+              connected: isConnected,
+              working: section.working,
+              ip: section.ip || null,
+              cleaningDays: section.cleaningDays,
+            };
+          });
+          setSections(updatedSections);
+          const connectedSections = updatedSections.filter(s => s.connected);
           const allConnectedWorking =
             connectedSections.length > 0 &&
             connectedSections.every(s => s.working);
@@ -79,6 +85,7 @@ export default function Home() {
         setLoading(false);
       }
     };
+
     fetchData();
     const unsubscribe = navigation.addListener('focus', fetchData);
     return unsubscribe;
@@ -91,33 +98,20 @@ export default function Home() {
       return;
     }
     setLoading(true);
-    const newWorkingStatus = !section.working;
+    const desiredState = !powerStatusStore.powerStatus[section.id];
     logModbusStatus(
       `Attempting to toggle ${section.name} to ${
-        newWorkingStatus ? 'ON' : 'OFF'
+        desiredState ? 'ON' : 'OFF'
       }...`,
     );
+
+    // Optimistically update the Zustand store immediately
+    powerStatusStore.setPowerStatus(section.id, desiredState);
+
     try {
-      await new Promise<void>((resolve, reject) => {
-        const operationTimeout = setTimeout(() => {
-          reject(new Error(`Modbus toggleLamp timed out for ${section.name}`));
-        }, 7000);
-        toggleLamp(section.ip!, 502, newWorkingStatus, msg => {
-          logModbusStatus(`  ${section.name}: ${msg}`);
-          const isError = msg.toLowerCase().includes('error');
-          const isSuccess =
-            msg.toLowerCase().includes('success') ||
-            msg.toLowerCase().includes('sent successfully');
-          clearTimeout(operationTimeout);
-          if (isError) {
-            reject(new Error(msg));
-          } else {
-            setTimeout(resolve, 100);
-          } // Resolve after send confirmation or success
-        });
-      });
+      await toggleLamp(section.ip!, 502, desiredState);
       logModbusStatus(
-        `Modbus command for ${section.name} sent. Updating database...`,
+        `Modbus toggle command for ${section.name} sent successfully.`,
       );
       await new Promise<void>((resolve, reject) => {
         updateSection(
@@ -125,17 +119,10 @@ export default function Home() {
           section.name,
           section.ip!,
           section.cleaningDays,
-          newWorkingStatus,
+          desiredState,
           success => {
             if (success) {
               logModbusStatus(`Database updated for ${section.name}.`);
-              const updatedSections = [...sections];
-              updatedSections[index].working = newWorkingStatus;
-              setSections(updatedSections);
-              const connected = updatedSections.filter(s => s.connected);
-              setAllSectionsWorking(
-                connected.length > 0 && connected.every(s => s.working),
-              );
               resolve();
             } else {
               logModbusStatus(`Failed DB update for ${section.name}.`);
@@ -144,10 +131,12 @@ export default function Home() {
           },
         );
       });
-      logModbusStatus(`Toggle complete for ${section.name}.`);
+      logModbusStatus(`Toggle and update complete for ${section.name}.`);
     } catch (error: any) {
       logModbusStatus(
-        `Error toggling section ${section.name}: ${error.message || error}`,
+        `Error during toggle operation for ${section.name}: ${
+          error.message || error
+        }`,
       );
     } finally {
       setLoading(false);
@@ -169,25 +158,33 @@ export default function Home() {
       setLoading(false);
       return;
     }
-    const modbusPromises = connectedSections.map(section => {
-      return new Promise<void>(resolve => {
-        const operationTimeout = setTimeout(() => {
-          logModbusStatus(`Warning: Timeout toggling ${section.name}`);
-          resolve();
-        }, 7000);
-        toggleLamp(section.ip!, 502, newStatus, msg => {
-          logModbusStatus(`  ${section.name}: ${msg}`);
-          clearTimeout(operationTimeout);
-          resolve(); // Resolve regardless of message for toggle all
-        });
-      });
+
+    const modbusResults = await Promise.allSettled(
+      connectedSections.map(section => {
+        logModbusStatus(
+          `Sending ${newStatus ? 'ON' : 'OFF'} command to ${section.name}...`,
+        );
+        return toggleLamp(section.ip!, 502, newStatus);
+      }),
+    );
+
+    modbusResults.forEach((result, index) => {
+      const sectionName = connectedSections[index].name;
+      if (result.status === 'fulfilled') {
+        logModbusStatus(`Toggle command for ${sectionName} sent successfully.`);
+      } else {
+        logModbusStatus(
+          `Error sending toggle command for ${sectionName}: ${
+            result.reason?.message || result.reason
+          }`,
+        );
+      }
     });
-    try {
-      await Promise.all(modbusPromises);
-      logModbusStatus("Modbus 'Toggle All' commands sent.");
-    } catch (error) {
-      logModbusStatus(`Error during Modbus Promise.all: ${error}`);
-    }
+
+    logModbusStatus(
+      "Modbus 'Toggle All' commands attempt finished. Updating database entries...",
+    );
+
     const dbUpdatePromises = connectedSections.map(section => {
       return new Promise<void>(resolve => {
         updateSection(
@@ -206,7 +203,11 @@ export default function Home() {
       });
     });
     await Promise.all(dbUpdatePromises);
-    logModbusStatus("Database 'Toggle All' updates attempted.");
+
+    logModbusStatus(
+      "Database 'Toggle All' updates attempted. Updating local state...",
+    );
+
     const finalSectionsState = sections.map(section => ({
       ...section,
       working: section.connected && section.ip ? newStatus : section.working,
@@ -218,23 +219,21 @@ export default function Home() {
   };
 
   const renderGridItem = ({item, index}: {item: any; index: number}) => {
-    // Using original status logic
     const status =
       item.cleaningDays < 7
-        ? item.cleaningDays < 5 // Nested check as per original
+        ? item.cleaningDays < 5
           ? 'error'
           : 'warning'
         : 'stable';
     return (
       <TouchableOpacity
-        style={[styles.gridItem, {flex: 1}]} // Original grid item style
+        style={[styles.gridItem, {flex: 1}]}
         onPress={() => {
           if (item.connected) {
             navigation.navigate('Section', {
-              // Pass params as before
-              sectionId: item.id,
-              sectionName: item.name,
-              sectionIp: item.ip,
+              sectionId: item.id as number,
+              sectionName: item.name as string,
+              sectionIp: item.ip as string | null,
             });
           } else {
             logModbusStatus(
@@ -242,39 +241,31 @@ export default function Home() {
             );
           }
         }}
-        disabled={!item.connected || loading} // Disable if not connected or loading
-      >
-        {/* Use original sectionCard style helper */}
+        disabled={!item.connected || loading}>
         <View style={sectionCard(status, item.connected)}>
           <View style={styles.sectionHeader}>
-            {/* Use original cardText style helper */}
             <Text style={cardText(status, item.connected)}>
               {item.connected ? status : 'disconnected'}
             </Text>
-            {/* Use original cardIcon style helper */}
             <View style={cardIcon(status, item.connected)}>
               {item.connected ? (
                 status === 'stable' ? (
                   <CheckIcon2 fill={'#fff'} width={24} height={24} />
                 ) : status === 'error' ? (
-                  // Original Error Icon structure
                   <View style={styles.errorIconContainer}>
                     <View style={styles.errorIconRingLarge} />
                     <View style={styles.errorIconRingSmall} />
                     <InfoIcon stroke={COLORS.error[600]} />
                   </View>
                 ) : (
-                  // Warning
                   <InfoIcon stroke={'#fff'} />
                 )
               ) : (
-                // Disconnected
                 <InfoIcon stroke={COLORS.gray[400]} />
               )}
             </View>
           </View>
           <View style={styles.sectionHeader}>
-            {/* Original sectionTitle style */}
             <Text
               style={[
                 styles.sectionTitle,
@@ -283,7 +274,11 @@ export default function Home() {
               {item.name}
             </Text>
             <CustomSwitch
-              value={item.connected ? item.working : false}
+              value={
+                item.connected
+                  ? powerStatusStore.powerStatus[item.id] ?? false
+                  : false
+              }
               onToggle={() => handleToggleSwitch(index)}
               disabled={!item.connected || loading}
             />
@@ -296,10 +291,8 @@ export default function Home() {
   return (
     <Layout>
       <View style={styles.container}>
-        {/* Header */}
         <View style={styles.header}>
           <Text style={styles.title}>Sections</Text>
-          {/* Original Warning/Error Count Display */}
           <View style={styles.warningContainer}>
             <View style={styles.warningBox}>
               <View style={warningDot(COLORS.warning[500])} />
@@ -323,14 +316,12 @@ export default function Home() {
           </View>
         </View>
 
-        {/* Loading Indicator - Centered Overlay */}
         {loading && (
           <View style={styles.loadingOverlay}>
             <ActivityIndicator size="large" color={COLORS.gray[600]} />
           </View>
         )}
 
-        {/* Sections Grid */}
         <FlatList
           key={isPortrait ? 'portrait' : 'landscape'}
           data={sections}
@@ -340,11 +331,10 @@ export default function Home() {
           columnWrapperStyle={styles.gridColumnWrapper}
           contentContainerStyle={styles.gridContentContainer}
           showsVerticalScrollIndicator={false}
-          scrollEnabled={!loading} // Disable scroll when loading
+          scrollEnabled={!loading}
           extraData={loading}
         />
 
-        {/* Bottom Switch */}
         <View style={styles.bottomSwitchContainer}>
           <CustomSwitch
             width={150}
@@ -360,10 +350,8 @@ export default function Home() {
   );
 }
 
-// *** Using the STYLES you provided originally for Home.tsx ***
 const styles = StyleSheet.create({
   container: {
-    // Original style
     flex: 1,
     backgroundColor: '#fff',
     paddingHorizontal: 32,
@@ -372,23 +360,19 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   header: {
-    // Original style
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
   title: {
-    // Original style
     fontSize: 40,
     fontWeight: '500',
   },
   warningContainer: {
-    // Original style
     flexDirection: 'row',
     gap: 16,
   },
   warningBox: {
-    // Original style
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1,
@@ -399,57 +383,48 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.warning[50],
   },
   warningText: {
-    // Original style
     color: COLORS.warning[700],
   },
   gridContentContainer: {
-    // Original style
     gap: 16,
-    paddingBottom: 80, // Added padding for bottom switch overlap
+    paddingBottom: 80,
   },
   gridItem: {
-    // Original style
     flex: 1,
   },
   gridColumnWrapper: {
-    // Original style
     gap: 16,
     justifyContent: 'space-between',
   },
   sectionHeader: {
-    // Original style
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
   sectionTitle: {
-    // Original style
     fontSize: 24,
     fontWeight: '600',
-    flexShrink: 1, // Allow shrinking
-    marginRight: 8, // Add gap
+    flexShrink: 1,
+    marginRight: 8,
   },
   bottomSwitchContainer: {
-    // Original style (adjusted positioning)
-    position: 'absolute', // Position at the bottom
+    position: 'absolute',
     bottom: 16,
     left: 0,
     right: 0,
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingVertical: 10, // Added padding
+    paddingVertical: 10,
   },
   errorIconContainer: {
-    // Original style
     position: 'relative',
-    width: 50, // Ensure container matches icon base size
+    width: 50,
     height: 50,
     justifyContent: 'center',
     alignItems: 'center',
   },
   errorIconRingLarge: {
-    // Original style
     borderWidth: 4,
     borderColor: COLORS.error[600],
     borderRadius: 1000,
@@ -457,10 +432,8 @@ const styles = StyleSheet.create({
     height: 50,
     position: 'absolute',
     opacity: 0.3,
-    // transform: [{translateY: '-25%'}, {translateX: '-25%'}], // Centering handled by container
   },
   errorIconRingSmall: {
-    // Original style
     width: 70,
     height: 70,
     opacity: 0.1,
@@ -468,10 +441,8 @@ const styles = StyleSheet.create({
     borderRadius: 1000,
     borderWidth: 4,
     borderColor: COLORS.error[600],
-    // transform: [{translateY: '-32%'}, {translateX: '-32%'}], // Centering handled by container
   },
   loadingOverlay: {
-    // Added loading overlay style
     position: 'absolute',
     top: 0,
     left: 0,
@@ -480,17 +451,15 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 255, 255, 0.7)',
     justifyContent: 'center',
     alignItems: 'center',
-    zIndex: 10, // Ensure it's on top
+    zIndex: 10,
   },
   loadingText: {
-    // Added loading text style (optional)
     marginTop: 10,
     fontSize: 16,
     color: COLORS.gray[700],
   },
 });
 
-// Original warningDot style helper
 const warningDot = (color: string): ViewStyle => ({
   marginRight: 10,
   backgroundColor: color,
@@ -499,7 +468,6 @@ const warningDot = (color: string): ViewStyle => ({
   borderRadius: 500,
 });
 
-// Original sectionCard style helper
 const sectionCard = (status: string, connected?: boolean): ViewStyle => ({
   borderWidth: connected ? 0 : 1,
   borderColor: COLORS.gray[100],
@@ -508,15 +476,14 @@ const sectionCard = (status: string, connected?: boolean): ViewStyle => ({
       ? COLORS.good[200]
       : status === 'warning'
       ? COLORS.warning[200]
-      : COLORS.error[200] // Added error color from original logic
-    : '#fff', // White if disconnected
-  height: 200, // Original fixed height
+      : COLORS.error[200]
+    : '#fff',
+  height: 200,
   justifyContent: 'space-between',
   borderRadius: 30,
   padding: 24,
 });
 
-// Original cardIcon style helper
 const cardIcon = (status: string, connected: boolean): ViewStyle => ({
   justifyContent: 'center',
   alignItems: 'center',
@@ -525,16 +492,15 @@ const cardIcon = (status: string, connected: boolean): ViewStyle => ({
       ? COLORS.good[500]
       : status === 'warning'
       ? COLORS.warning[500]
-      : 'transparent' // Error was transparent in original
-    : COLORS.gray[100], // Disconnected color
+      : 'transparent'
+    : COLORS.gray[100],
   width: 50,
   height: 50,
   borderRadius: 1000,
 });
 
-// Original cardText style helper
 const cardText = (status: string, connected: boolean): TextStyle => ({
-  textTransform: 'capitalize', // Added capitalize
+  textTransform: 'capitalize',
   justifyContent: 'center',
   alignItems: 'center',
   backgroundColor: connected
@@ -542,26 +508,26 @@ const cardText = (status: string, connected: boolean): TextStyle => ({
       ? COLORS.good[50]
       : status === 'warning'
       ? COLORS.warning[50]
-      : COLORS.error[50] // Added error background from original logic
-    : COLORS.gray[100], // Background for disconnected
+      : COLORS.error[50]
+    : COLORS.gray[100],
   borderWidth: 1,
   borderColor: connected
     ? status === 'stable'
       ? COLORS.good[200]
       : status === 'warning'
       ? COLORS.warning[200]
-      : COLORS.error[200] // Added error border from original logic
-    : COLORS.gray[200], // Border for disconnected
+      : COLORS.error[200]
+    : COLORS.gray[200],
   color: connected
     ? status === 'stable'
       ? COLORS.good[700]
       : status === 'warning'
       ? COLORS.warning[700]
-      : COLORS.error[700] // Added error text color from original logic
-    : COLORS.gray[700], // Text color for disconnected
+      : COLORS.error[700]
+    : COLORS.gray[700],
   paddingHorizontal: 12,
   paddingVertical: 3,
   borderRadius: 1000,
-  fontSize: 14, // Added font size
-  fontWeight: '500', // Added font weight
+  fontSize: 14,
+  fontWeight: '500',
 });
