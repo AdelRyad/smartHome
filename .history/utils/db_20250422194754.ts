@@ -23,9 +23,9 @@ interface ContactInfo {
   name: string;
   email: string;
   phone: string;
-  project_refrence: string;
-  hood_refrence: string;
-  commission_date: string;
+  projectRefrence: string;
+  hoodRefrence: string;
+  commissionDate: string;
 }
 
 const getDatabase = async () => {
@@ -290,8 +290,6 @@ export const updateContactInfo = async (
   contact: ContactInfo, // Use local ContactInfo type
   callback: (success: boolean) => void,
 ) => {
-  console.log('Updating contact info:', contact);
-
   const db = await getDatabase(); // Get DB instance
   db.transaction(tx => {
     tx.executeSql(
@@ -301,9 +299,9 @@ export const updateContactInfo = async (
       [
         contact.email,
         contact.phone,
-        contact.project_refrence, // Value from object (camelCase)
-        contact.hood_refrence, // Value from object (camelCase)
-        contact.commission_date, // Value from object (camelCase)
+        contact.projectRefrence, // Value from object (camelCase)
+        contact.hoodRefrence, // Value from object (camelCase)
+        contact.commissionDate, // Value from object (camelCase)
       ],
       (_, resultSet) => {
         // Check if the update was successful (e.g., rowsAffected > 0)

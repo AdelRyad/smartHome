@@ -96,7 +96,7 @@ export const Section = ({}) => {
 
     setPassword(newPassword);
 
-    if (newPassword.join('') === '2826') {
+    if (newPassword.join('') === '1234') {
       setIsPasswordRequired(false);
       setPassword(['', '', '', '']);
       setModalMode('resetLamp');
@@ -132,6 +132,7 @@ export const Section = ({}) => {
     if (section?.ip) {
       const fetchData = async () => {
         try {
+          logStatus(`Fetching data for ${section.name}...`);
           const devicesFromDb = await new Promise<any[] | null>(resolve => {
             getDevicesForSection(+section.id, resolve);
           });
@@ -140,6 +141,8 @@ export const Section = ({}) => {
             throw new Error('No devices found');
           }
           setDevices(devicesFromDb);
+
+          logStatus('Data fetch cycle complete.');
         } catch (error: any) {
           logStatus(
             `Error fetching data: ${error?.message || String(error)}`,
@@ -384,9 +387,16 @@ export const Section = ({}) => {
               {isLampActive ? (
                 <View style={styles.daysLeftContainer}>
                   <Text style={styles.daysLeftText}>
-                    {Math.floor(remainingHours)}
+                    {remainingHours} Hours
                   </Text>
-                  <Text style={styles.daysLeftText}>Hours Left</Text>
+                  <Text
+                    style={{
+                      fontSize: 16,
+                      color: COLORS.gray[600],
+                      fontWeight: '500',
+                    }}>
+                    Left
+                  </Text>
                 </View>
               ) : (
                 <Text style={styles.disabledText}>(Not Monitored)</Text>

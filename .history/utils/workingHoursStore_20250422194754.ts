@@ -99,7 +99,7 @@ const useWorkingHoursStore = create<WorkingHoursState>(set => {
   };
 
   fetchAllSectionsData();
-  setInterval(fetchAllSectionsData, 5 * 1000); // 1 minute
+  setInterval(fetchAllSectionsData, 60 * 1000); // 1 minute
 
   return {
     workingHours: {},

@@ -214,7 +214,7 @@ const Header = () => {
               title,
               index,
               position: {
-                x: pageX + width / 2 + 10, // Start at center
+                x: pageX + width / 2, // Start at center
                 y: pageY + height - 10, // Position below icon
               },
               // Add lamp warnings/errors for tooltip

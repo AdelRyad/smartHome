@@ -26,20 +26,18 @@ const CustomTabBar = () => {
 
   return (
     <View style={styles.tabContainer}>
-      {tabs.map(tab => {
-        return (
-          <TouchableOpacity
-            key={tab.title}
-            onPress={() => navigation.navigate(tab.title as never)}
-            style={[
-              styles.tabButton,
-              currentTab === tab.title && styles.activeTabButton,
-            ]}>
-            <tab.icon fill={'black'} style={styles.icon} />
-            <Text style={styles.tabText}>{tab.title}</Text>
-          </TouchableOpacity>
-        );
-      })}
+      {tabs.map(tab => (
+        <TouchableOpacity
+          key={tab.title}
+          onPress={() => navigation.navigate(tab.title as never)}
+          style={[
+            styles.tabButton,
+            currentTab === tab.title && styles.activeTabButton,
+          ]}>
+          <tab.icon fill={'black'} style={styles.icon} />
+          <Text style={styles.tabText}>{tab.title}</Text>
+        </TouchableOpacity>
+      ))}
     </View>
   );
 };
@@ -77,12 +75,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '500',
     color: COLORS.gray[950],
-  },
-  statusDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    marginLeft: 4,
   },
 });
 

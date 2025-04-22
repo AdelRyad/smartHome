@@ -73,7 +73,7 @@ const useCleaningHoursStore = create<CleaningHoursState>(set => {
   };
 
   fetchAllSectionsData();
-  setInterval(fetchAllSectionsData, 5 * 1000);
+  setInterval(fetchAllSectionsData, 60 * 1000);
 
   return {
     remainingCleaningHours: {},

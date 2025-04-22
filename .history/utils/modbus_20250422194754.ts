@@ -395,9 +395,7 @@ export const resetLampHours = async (
     const errorMsg = `Error resetting Lamp ${lampIndex}: ${
       error instanceof Error ? error.message : 'Unknown error'
     }`;
-    if (setStatus) {
-      setStatus(errorMsg);
-    }
+    setStatus(errorMsg);
     throw error;
   }
 };
@@ -633,7 +631,7 @@ export const setCleaningHoursSetpoint = (
   ip: string,
   port: number,
   value: number,
-  setStatus?: (msg: string) => void,
+  setStatus: (msg: string) => void,
 ): Promise<void> => {
   const startAddress = 2; // Holding Register 2
   const functionCode = 0x06; // Write Single Register (FC6)
@@ -669,13 +667,11 @@ export const setCleaningHoursSetpoint = (
   return sendModbusRequest(ip, port, requestHigh)
     .then(() => sendModbusRequest(ip, port, requestLow))
     .then(() => {
-      if (setStatus) {
-        setStatus(`Cleaning Hours Setpoint set to ${value} successfully.`);
-      }
+      setStatus(`Cleaning Hours Setpoint set to ${value} successfully.`);
     })
     .catch(error => {
       const errorMsg = `Error setting Cleaning Hours Setpoint: ${error.message}`;
-
+      setStatus(errorMsg);
       console.error(`[setCleaningHoursSetpoint] ${errorMsg}`, error);
       throw error;
     });
@@ -887,55 +883,38 @@ const readPressureButton = (
   ip: string,
   port: number,
   setStatus: (msg: string) => void,
-  callback: (isOk: boolean | null) => void,
+  setButtonStatus: (isOk: boolean | null) => void,
 ) => {
-  const address = 19; // Discrete 19 (matches SENSOR_ADDRESSES["LIMIT_SWITCH"][0])
-  const quantity = 1; // Matches SENSOR_ADDRESSES["LIMIT_SWITCH"][1]
+  const address = 19; // Discrete 19
+  const quantity = 1;
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x02, address, quantity);
-
-  console.log(`[readPressureButton] Request: ${request.toString('hex')}`);
   setStatus('Reading Pressure Button Status...');
-
   sendModbusRequest(ip, port, request)
     .then(data => {
-      if (!data || data.length < 10) {
-        setStatus('Error: Invalid response length');
-        callback(null);
-        return;
+      if (data && data.length >= 10 && data[8] === 1) {
+        const statusBit = data[9] & 0x01;
+        const isOk = statusBit === 1;
+        setStatus(
+          `Pressure Button Status: ${
+            isOk ? 'OK' : 'Pressed/Issue (Trigger Filter Icon)'
+          }`,
+        );
+        setButtonStatus(isOk);
+      } else {
+        setStatus(
+          `Error: Invalid response for readPressureButton: ${data?.toString(
+            'hex',
+          )}`,
+        );
+        setButtonStatus(null);
       }
-
-      // Check for Modbus exception
-      if (data[7] & 0x80) {
-        const exceptionCode = data[8];
-        setStatus(`Modbus Exception ${exceptionCode} reading pressure button`);
-        callback(null);
-        return;
-      }
-
-      if (data[8] !== 1) {
-        // Expecting 1 byte of data
-        setStatus(`Error: Unexpected byte count ${data[8]}`);
-        callback(null);
-        return;
-      }
-
-      const statusBit = data[9] & 0x01;
-      const isOk = statusBit === 1;
-
-      console.log(
-        `[readPressureButton] Response: ${data.toString('hex')}, Status: ${
-          isOk ? 'OK' : 'Pressed'
-        }`,
-      );
-      setStatus(`Pressure Button Status: ${isOk ? 'OK' : 'Pressed'}`);
-      callback(isOk);
     })
     .catch(error => {
-      console.error(`[readPressureButton] Error: ${error.message}`);
-      setStatus(`Error: ${error.message}`);
-      callback(null);
+      setStatus(`Error reading pressure button status: ${error.message}`);
+      setButtonStatus(null);
     });
 };
+
 /**
  * Read number of lamps online (Input 22).
  */

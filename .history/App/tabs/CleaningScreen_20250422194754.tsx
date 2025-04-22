@@ -109,7 +109,7 @@ const CleaningScreen = () => {
     try {
       const value = await readCleaningHoursSetpoint(selectedSection.ip, 502);
       console.log(`[Debug] Fetched cleaning hours setpoint: ${value}`);
-      const formattedValue = Math.round(value ?? 0).toString(); // Round to whole number
+      const formattedValue = Math.round(value).toString(); // Round to whole number
       setCurrentSetpoint(parseFloat(formattedValue));
       setNewValue(formattedValue); // Ensure the TextInput shows the whole number
       logStatus(`Fetched cleaning hours setpoint: ${formattedValue} hours`);
@@ -482,11 +482,12 @@ const styles = StyleSheet.create({
   scrollItem: {
     paddingHorizontal: 16,
     paddingVertical: 10,
-    borderLeftWidth: 5,
+    borderLeftWidth: 4,
+    borderRadius: 4,
+    marginBottom: 4,
   },
   scrollItemText: {
-    color: COLORS.gray[700],
-    fontSize: 21,
+    fontSize: 18,
     fontWeight: '500',
   },
   noSectionsContainer: {

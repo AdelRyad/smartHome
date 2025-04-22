@@ -39,27 +39,27 @@ interface ContactInfoState {
   name: string;
   email: string;
   phone: string;
-  project_refrence: string;
-  hood_refrence: string;
-  commission_date: string; // Keep as string from DB
+  projectRefrence: string;
+  hoodRefrence: string;
+  commissionDate: string; // Keep as string from DB
 }
 
 // Define the fields based on the state structure
 const contactFields: ContactField[] = [
   {
-    key: 'project_refrence',
+    key: 'projectRefrence',
     title: 'Project reference',
     icon: RefrenceIcon,
     type: 'text',
   },
   {
-    key: 'hood_refrence',
+    key: 'hoodRefrence',
     title: 'Hood reference',
     icon: RefrenceIcon,
     type: 'text',
   },
   {
-    key: 'commission_date',
+    key: 'commissionDate',
     title: 'Commission Date',
     icon: CalednarIocn,
     type: 'date',
@@ -82,9 +82,9 @@ const ContactScreen = () => {
     name: '',
     email: '',
     phone: '',
-    project_refrence: '',
-    hood_refrence: '',
-    commission_date: new Date().toISOString(), // Initialize with ISO string
+    projectRefrence: '',
+    hoodRefrence: '',
+    commissionDate: new Date().toISOString(), // Initialize with ISO string
   });
 
   // State for edited values, initialized with contactInfo
@@ -94,25 +94,22 @@ const ContactScreen = () => {
   // Fetch initial data
   useEffect(() => {
     getContactInfo(fetchedContact => {
-      console.log('Fetched contact info:', fetchedContact);
-
       const initialData = {
         name: fetchedContact.name || '',
         email: fetchedContact.email || '',
         phone: fetchedContact.phone || '',
-        project_refrence: fetchedContact.project_refrence || '',
-        hood_refrence: fetchedContact.hood_refrence || '',
-        // Ensure commission_date is a valid date string or default
-        commission_date:
-          fetchedContact.commission_date || new Date().toISOString(),
+        projectRefrence: fetchedContact.projectRefrence || '',
+        hoodRefrence: fetchedContact.hoodRefrence || '',
+        // Ensure commissionDate is a valid date string or default
+        commissionDate: fetchedContact.commissionDate || new Date().toISOString(),
       };
       setContactInfo(initialData);
       setEditedContactInfo(initialData); // Initialize edits with fetched data
       try {
         // Also set the date picker initial value correctly
-        setDatePickerValue(new Date(initialData.commission_date));
+        setDatePickerValue(new Date(initialData.commissionDate));
       } catch (e) {
-        console.error('Error parsing commission date for picker:', e);
+        console.error("Error parsing commission date for picker:", e);
         setDatePickerValue(new Date()); // Default if parsing fails
       }
     });
@@ -125,15 +122,12 @@ const ContactScreen = () => {
 
   // Render item based on the field definition
   const renderGridItem = ({item}: {item: ContactField}) => {
-    const displayValue = edit
-      ? editedContactInfo[item.key]
-      : contactInfo[item.key];
+    const displayValue = edit ? editedContactInfo[item.key] : contactInfo[item.key];
 
     // Format date for display
-    const formattedDisplayValue =
-      item.type === 'date'
-        ? new Date(displayValue || Date.now()).toLocaleDateString() // Use locale string, handle potential invalid date
-        : displayValue;
+    const formattedDisplayValue = item.type === 'date'
+      ? new Date(displayValue || Date.now()).toLocaleDateString() // Use locale string, handle potential invalid date
+      : displayValue;
 
     return (
       <View style={[styles.gridItem, {maxWidth: isPortrait ? '100%' : '49%'}]}>
@@ -151,9 +145,9 @@ const ContactScreen = () => {
                 if (edit) {
                   // Try parsing current edited date for picker, default if invalid
                   try {
-                    setDatePickerValue(new Date(editedContactInfo[item.key]));
+                     setDatePickerValue(new Date(editedContactInfo[item.key]));
                   } catch {
-                    setDatePickerValue(new Date());
+                     setDatePickerValue(new Date());
                   }
                   setShowDatePicker(true);
                 }
@@ -184,6 +178,7 @@ const ContactScreen = () => {
     );
   };
 
+
   // Show confirmation modal
   const handleSaveChanges = () => {
     setModalVisible(true);
@@ -193,33 +188,21 @@ const ContactScreen = () => {
   const handleConfirmChanges = () => {
     // Construct the object expected by updateContactInfo, including the original name
     const dataToSave = {
-      name: editedContactInfo.name,
-      email: editedContactInfo.email,
-      phone: editedContactInfo.phone,
-      project_refrence: editedContactInfo.project_refrence,
-      hood_refrence: editedContactInfo.hood_refrence,
-      commission_date: editedContactInfo.commission_date,
+      ...editedContactInfo,
+      name: contactInfo.name || 'Admin', // This line is now valid
+      // id is optional in ContactInfo, so we don't need to add it explicitly unless required by update logic
     };
-
     // Call update function with the reconstructed data
     updateContactInfo(dataToSave, (success: boolean) => {
-      if (success) {
-        setContactInfo({
-          name: dataToSave.name,
-          email: dataToSave.email,
-          phone: dataToSave.phone,
-          project_refrence: dataToSave.project_refrence,
-          hood_refrence: dataToSave.hood_refrence,
-          commission_date: dataToSave.commission_date,
-        });
-
-        setEdit(false);
-        console.log('Contact Info Updated Successfully');
-      } else {
-        console.error('Failed to update contact info');
-        // Optionally show an error message to the user
-      }
-      setModalVisible(false); // Close modal regardless of success/fail
+       if (success) {
+         setContactInfo(dataToSave); // Update main state with saved data (including name)
+         setEdit(false);
+         console.log('Contact Info Updated Successfully');
+       } else {
+         console.error('Failed to update contact info');
+         // Optionally show an error message to the user
+       }
+       setModalVisible(false); // Close modal regardless of success/fail
     });
   };
 
@@ -254,7 +237,7 @@ const ContactScreen = () => {
             setShowDatePicker(false); // Hide picker immediately
             if (event.type === 'set' && selectedDate) {
               // Update the edited state with the new date's ISO string
-              handleInputChange('commission_date', selectedDate.toISOString());
+              handleInputChange('commissionDate', selectedDate.toISOString());
             }
           }}
         />
@@ -351,7 +334,7 @@ const styles = StyleSheet.create({
     borderRadius: 30,
     padding: 24,
     shadowColor: '#000', // Use shadow props for iOS
-    shadowOffset: {width: 0, height: 4},
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.05,
     shadowRadius: 12,
     elevation: 5, // Use elevation for Android
@@ -437,7 +420,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 16,
   },
-  editButton: {
+   editButton: {
     paddingHorizontal: 32,
     paddingVertical: 16,
     borderWidth: 1,

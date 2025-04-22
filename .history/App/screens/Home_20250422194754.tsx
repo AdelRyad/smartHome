@@ -20,7 +20,6 @@ import {getSectionsWithStatus, updateSection} from '../../utils/db';
 
 import {toggleLamp} from '../../utils/modbus';
 import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
-import {useStatusStore} from '../../utils/statusStore';
 
 type RootStackParamList = {
   Home: undefined;
@@ -219,47 +218,13 @@ export default function Home() {
     setLoading(false);
   };
 
-  const {statusBySection} = useStatusStore();
-
-  // Helper to get section name by id
-
-  // Aggregate error/warning counts for each status type
-  const dpsErrorCount = Object.values(statusBySection).filter(
-    s => s.dps.status === 'error',
-  ).length;
-  const dpsWarningCount = Object.values(statusBySection).filter(
-    s => s.dps.status === 'warning',
-  ).length;
-  const pressureErrorCount = Object.values(statusBySection).filter(
-    s => s.pressureButton.status === 'error',
-  ).length;
-  const pressureWarningCount = Object.values(statusBySection).filter(
-    s => s.pressureButton.status === 'warning',
-  ).length;
-  const lampErrorCount = Object.values(statusBySection).filter(s =>
-    Object.values(s.lamps).some(lamp => lamp.status === 'error'),
-  ).length;
-  const lampWarningCount = Object.values(statusBySection).filter(s =>
-    Object.values(s.lamps).some(lamp => lamp.status === 'warning'),
-  ).length;
-  const cleaningErrorCount = Object.values(statusBySection).filter(
-    s => s.cleaning.status === 'error',
-  ).length;
-  const cleaningWarningCount = Object.values(statusBySection).filter(
-    s => s.cleaning.status === 'warning',
-  ).length;
-
-  const errorCount =
-    dpsErrorCount + pressureErrorCount + lampErrorCount + cleaningErrorCount;
-  const warningCount =
-    dpsWarningCount +
-    pressureWarningCount +
-    lampWarningCount +
-    cleaningWarningCount;
-
   const renderGridItem = ({item, index}: {item: any; index: number}) => {
-    const status = statusBySection[item.id]?.dps.status || 'stable';
-
+    const status =
+      item.cleaningDays < 7
+        ? item.cleaningDays < 5
+          ? 'error'
+          : 'warning'
+        : 'stable';
     return (
       <TouchableOpacity
         style={[styles.gridItem, {flex: 1}]}
@@ -331,11 +296,22 @@ export default function Home() {
           <View style={styles.warningContainer}>
             <View style={styles.warningBox}>
               <View style={warningDot(COLORS.warning[500])} />
-              <Text style={styles.warningText}>{warningCount} Warnings</Text>
+              <Text style={styles.warningText}>
+                {
+                  sections.filter(
+                    s =>
+                      s.connected && s.cleaningDays < 7 && s.cleaningDays >= 5,
+                  ).length
+                }{' '}
+                Warnings
+              </Text>
             </View>
             <View style={styles.warningBox}>
               <View style={warningDot(COLORS.error[500])} />
-              <Text style={styles.warningText}>{errorCount} Errors</Text>
+              <Text style={styles.warningText}>
+                {sections.filter(s => s.connected && s.cleaningDays < 5).length}{' '}
+                Errors
+              </Text>
             </View>
           </View>
         </View>

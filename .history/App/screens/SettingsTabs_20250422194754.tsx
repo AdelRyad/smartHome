@@ -18,10 +18,7 @@ type RootStackParamList = {
   Settings: undefined; // Assuming Settings takes no params
   // Add other routes and their params here
 };
-type SettingsScreenNavigationProp = NavigationProp<
-  RootStackParamList,
-  'Settings'
->;
+type SettingsScreenNavigationProp = NavigationProp<RootStackParamList, 'Settings'>;
 
 const Tab = createMaterialTopTabNavigator();
 
@@ -65,7 +62,7 @@ const SettingsTabs = () => {
     setPassword(newPassword);
 
     // Check if the password is correct
-    if (newPassword.join('') === '3645') {
+    if (newPassword.join('') === '1234') {
       setIsModalVisible(false);
       setIsPasswordRequired(false);
     }

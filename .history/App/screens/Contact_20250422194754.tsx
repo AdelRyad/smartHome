@@ -1,87 +1,38 @@
-import React, {useEffect, useState} from 'react';
+import React from 'react';
 import {View, Text, StyleSheet, FlatList} from 'react-native';
 import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
-import {
-  CalednarIocn,
-  CallIcon,
-  MailIcon,
-  QrCode,
-  QRIcon,
-  RefrenceIcon,
-} from '../../icons';
+import {MailIcon, QrCode, QRIcon, RefrenceIcon} from '../../icons';
 import {useWindowDimensions} from 'react-native';
-import {getContactInfo} from '../../utils/db';
-
-// Define the ContactField type
-type ContactField = {
-  key: string;
-  title: string;
-  icon: React.ComponentType<any>;
-  type: string;
-};
 
 const ContactUsScreen = () => {
   const {width, height} = useWindowDimensions();
   const isPortrait = height > width;
-  type ContactInfo = {
-    email?: string;
-    phone?: string;
-    project_refrence?: string;
-    hood_refrence?: string;
-    commission_date?: string;
-  };
 
-  const [contactInfo, setContactInfo] = useState<ContactInfo | null>(null);
-  useEffect(() => {
-    getContactInfo(contact => setContactInfo(contact));
-  }, []);
+  // Data for the grid
+  const gridData = Array.from({length: 4}, (_, index) => ({
+    id: index + 1,
+    title: `UVC ${index + 1}`,
+    daysLeft: 32,
+  }));
 
-  const contactFields = [
-    {
-      key: 'project_refrence',
-      title: 'Project reference',
-      icon: RefrenceIcon,
-      type: 'text',
-    },
-    {
-      key: 'hood_refrence',
-      title: 'Hood reference',
-      icon: RefrenceIcon,
-      type: 'text',
-    },
-    {
-      key: 'commission_date',
-      title: 'Commission Date',
-      icon: CalednarIocn,
-      type: 'date',
-    },
-    {key: 'phone', title: 'Phone Number', icon: CallIcon, type: 'phone'},
-  ];
   // Render item for the grid
-  const renderGridItem = ({item}: {item: ContactField}) => {
-    const value = contactInfo ? contactInfo[item.key as keyof ContactInfo] : '';
-
-    return (
-      <View style={[styles.gridItem, {maxWidth: isPortrait ? '100%' : '49%'}]}>
-        <View style={styles.card}>
-          <View style={styles.cardContent}>
-            <View style={styles.cardHeader}>
-              <View style={styles.cardIconWrapper}>
-                <RefrenceIcon fill={'black'} style={styles.cardIcon} />
-              </View>
-              <Text style={styles.cardSubText}>{item.title}</Text>
+  const renderGridItem = () => (
+    <View style={[styles.gridItem, {maxWidth: isPortrait ? '100%' : '49%'}]}>
+      <View style={styles.card}>
+        <View style={styles.cardContent}>
+          <View style={styles.cardHeader}>
+            <View style={styles.cardIconWrapper}>
+              <RefrenceIcon fill={'black'} style={styles.cardIcon} />
             </View>
-            <Text style={styles.cardTitle}>
-              {item.type === 'date'
-                ? new Date(value).toLocaleDateString()
-                : value}
-            </Text>
+            <Text style={styles.cardSubText}>Project name</Text>
           </View>
+          <Text style={styles.cardTitle}>Project description</Text>
         </View>
       </View>
-    );
-  };
+    </View>
+  );
+
   return (
     <Layout>
       <View style={styles.header}>
@@ -100,9 +51,9 @@ const ContactUsScreen = () => {
             <FlatList
               key={isPortrait ? 'portrait' : 'landscape'} // Forces re-render
               numColumns={isPortrait ? 1 : 2}
-              data={contactFields}
+              data={gridData}
               renderItem={renderGridItem}
-              keyExtractor={item => item.key}
+              keyExtractor={item => item.id.toString()}
               columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
               contentContainerStyle={styles.gridContentContainer}
               showsVerticalScrollIndicator={false}
@@ -115,9 +66,9 @@ const ContactUsScreen = () => {
                   <View style={styles.cardIconWrapper}>
                     <MailIcon fill={'black'} style={styles.cardIcon} />
                   </View>
-                  <Text style={styles.cardSubText}>Email Adress</Text>
+                  <Text style={styles.cardSubText}>Project name</Text>
                 </View>
-                <Text style={styles.cardTitle}>{contactInfo?.email}</Text>
+                <Text style={styles.cardTitle}>contactus@avante.com</Text>
               </View>
             </View>
           </View>

@@ -67,7 +67,7 @@ const useDpsPressureStore = create<DpsPressureState>(set => {
   };
 
   fetchAllSectionsData();
-  setInterval(fetchAllSectionsData, 5 * 1000);
+  setInterval(fetchAllSectionsData, 60 * 1000);
 
   return {
     dpsPressureStatus: {},
