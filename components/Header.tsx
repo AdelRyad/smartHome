@@ -1,4 +1,4 @@
-import React, {useState, useRef} from 'react';
+import React, {useState, useRef, useEffect} from 'react';
 import {
   View,
   StyleSheet,
@@ -32,6 +32,7 @@ import {getSectionsWithStatus} from '../utils/db';
 import {useStatusStore} from '../utils/statusStore';
 import TooltipContent from './TooltipContent';
 import PopupModal from './PopupModal';
+import {useCurrentSectionStore} from '../utils/useCurrentSectionStore';
 
 if (UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -43,6 +44,8 @@ const Header = () => {
   const currentPage = route.name;
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [password, setPassword] = useState(['', '', '', '']);
+  const {currentSectionId} = useCurrentSectionStore();
+  console.log('currentSectionId', currentSectionId);
 
   const handleKeyPress = (key: string | number) => {
     let newPassword = [...password];
@@ -82,6 +85,7 @@ const Header = () => {
   const [sections, setSections] = useState<
     {id: number; name: string; cleaningDays: number}[]
   >([]);
+  const {setCurrentSectionId} = useCurrentSectionStore();
 
   React.useEffect(() => {
     getSectionsWithStatus(secs => {
@@ -93,35 +97,92 @@ const Header = () => {
     });
   }, []);
 
-  const {statusBySection} = useStatusStore();
+  const {statusBySection, fetchAllStatuses} = useStatusStore();
 
+  useEffect(() => {
+    setInterval(() => {
+      fetchAllStatuses();
+    }, 5 * 1000); // Fetch every 5 minutes
+  }, [fetchAllStatuses]);
   // Helper to get section name by id
+  const getSectionStatusCounts = (
+    sectionId: number | null,
+    statusBySection: Record<number, SectionStatus>,
+  ) => {
+    if (sectionId === null) {
+      // Return global counts if no section is selected
+      return {
+        dpsErrorCount: Object.values(statusBySection).filter(
+          s => s.dps.status === 'error',
+        ).length,
+        dpsWarningCount: Object.values(statusBySection).filter(
+          s => s.dps.status === 'warning',
+        ).length,
+        pressureErrorCount: Object.values(statusBySection).filter(
+          s => s.pressureButton.status === 'error',
+        ).length,
+        pressureWarningCount: Object.values(statusBySection).filter(
+          s => s.pressureButton.status === 'warning',
+        ).length,
+        lampErrorCount: Object.values(statusBySection).filter(s =>
+          Object.values(s.lamps).some(lamp => lamp.status === 'error'),
+        ).length,
+        lampWarningCount: Object.values(statusBySection).filter(s =>
+          Object.values(s.lamps).some(lamp => lamp.status === 'warning'),
+        ).length,
+        cleaningErrorCount: Object.values(statusBySection).filter(
+          s => s.cleaning.status === 'error',
+        ).length,
+        cleaningWarningCount: Object.values(statusBySection).filter(
+          s => s.cleaning.status === 'warning',
+        ).length,
+      };
+    }
 
+    const sectionStatus = statusBySection[sectionId];
+    console.log('sectionStatus', sectionStatus);
+
+    if (!sectionStatus) {
+      return {
+        dpsErrorCount: 0,
+        dpsWarningCount: 0,
+        pressureErrorCount: 0,
+        pressureWarningCount: 0,
+        lampErrorCount: 0,
+        lampWarningCount: 0,
+        cleaningErrorCount: 0,
+        cleaningWarningCount: 0,
+      };
+    }
+
+    return {
+      dpsErrorCount: sectionStatus.dps.status === 'error' ? 1 : 0,
+      dpsWarningCount: sectionStatus.dps.status === 'warning' ? 1 : 0,
+      pressureErrorCount:
+        sectionStatus.pressureButton.status === 'error' ? 1 : 0,
+      pressureWarningCount:
+        sectionStatus.pressureButton.status === 'warning' ? 1 : 0,
+      lampErrorCount: Object.values(sectionStatus.lamps).filter(
+        lamp => lamp.status === 'error',
+      ).length,
+      lampWarningCount: Object.values(sectionStatus.lamps).filter(
+        lamp => lamp.status === 'warning',
+      ).length,
+      cleaningErrorCount: sectionStatus.cleaning.status === 'error' ? 1 : 0,
+      cleaningWarningCount: sectionStatus.cleaning.status === 'warning' ? 1 : 0,
+    };
+  };
   // Aggregate error/warning counts for each status type
-  const dpsErrorCount = Object.values(statusBySection).filter(
-    s => s.dps.status === 'error',
-  ).length;
-  const dpsWarningCount = Object.values(statusBySection).filter(
-    s => s.dps.status === 'warning',
-  ).length;
-  const pressureErrorCount = Object.values(statusBySection).filter(
-    s => s.pressureButton.status === 'error',
-  ).length;
-  const pressureWarningCount = Object.values(statusBySection).filter(
-    s => s.pressureButton.status === 'warning',
-  ).length;
-  const lampErrorCount = Object.values(statusBySection).filter(s =>
-    Object.values(s.lamps).some(lamp => lamp.status === 'error'),
-  ).length;
-  const lampWarningCount = Object.values(statusBySection).filter(s =>
-    Object.values(s.lamps).some(lamp => lamp.status === 'warning'),
-  ).length;
-  const cleaningErrorCount = Object.values(statusBySection).filter(
-    s => s.cleaning.status === 'error',
-  ).length;
-  const cleaningWarningCount = Object.values(statusBySection).filter(
-    s => s.cleaning.status === 'warning',
-  ).length;
+  const {
+    dpsErrorCount,
+    dpsWarningCount,
+    pressureErrorCount,
+    pressureWarningCount,
+    lampErrorCount,
+    lampWarningCount,
+    cleaningErrorCount,
+    cleaningWarningCount,
+  } = getSectionStatusCounts(currentSectionId, statusBySection);
 
   const errorCount =
     dpsErrorCount + pressureErrorCount + lampErrorCount + cleaningErrorCount;
@@ -130,7 +191,6 @@ const Header = () => {
     pressureWarningCount +
     lampWarningCount +
     cleaningWarningCount;
-
   const elements = [
     {
       title: 'dps_pressure',
@@ -164,13 +224,13 @@ const Header = () => {
       errorCount: pressureErrorCount,
       warningCount: pressureWarningCount,
     },
-    {
-      title: 'door',
-      icon: DoorIcon, // Placeholder
-      status: 'good',
-      errorCount: 0,
-      warningCount: 0,
-    },
+    // {
+    //   title: 'door',
+    //   icon: DoorIcon, // Placeholder
+    //   status: 'good',
+    //   errorCount: 0,
+    //   warningCount: 0,
+    // },
     {
       title: 'cleaning',
       icon: CleaningIcon,
@@ -308,7 +368,10 @@ const Header = () => {
         <View style={styles.navLinks}>
           <TouchableOpacity
             style={[styles.link, currentPage === 'Home' && styles.activeLink]}
-            onPress={() => navigation.navigate('Home' as never)}>
+            onPress={() => {
+              navigation.navigate('Home' as never);
+              setCurrentSectionId(null);
+            }}>
             {currentPage === 'Home' ? <HomeIcon /> : <InActiveHomeIcon />}
           </TouchableOpacity>
           <TouchableOpacity
@@ -319,7 +382,10 @@ const Header = () => {
                 currentPage !== 'Section' &&
                 styles.activeLink,
             ]}
-            onPress={() => navigation.navigate('Settings' as never)}>
+            onPress={() => {
+              navigation.navigate('Settings' as never);
+              setCurrentSectionId(null);
+            }}>
             {currentPage !== 'ContactUs' &&
             currentPage !== 'Home' &&
             currentPage !== 'Section' ? (
@@ -388,6 +454,7 @@ const Header = () => {
                 ]}
                 onPress={() => {
                   navigation.navigate('ContactUs' as never);
+                  setCurrentSectionId(null);
                 }}>
                 <CustomerServiceIcon
                   fill={currentPage === 'ContactUs' ? '#fff' : '#000'}

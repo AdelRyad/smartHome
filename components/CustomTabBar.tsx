@@ -8,10 +8,12 @@ import {
   IPAdressIcon,
   LampIcon,
 } from '../icons';
+import {useCurrentSectionStore} from '../utils/useCurrentSectionStore';
 
 const CustomTabBar = () => {
   const state = useNavigationState(state => state);
   const navigation = useNavigation();
+  const {setCurrentSectionId} = useCurrentSectionStore();
 
   const currentTab = state.routes[state.index].name;
   const tabs = [
@@ -30,7 +32,12 @@ const CustomTabBar = () => {
         return (
           <TouchableOpacity
             key={tab.title}
-            onPress={() => navigation.navigate(tab.title as never)}
+            onPress={() => {
+              navigation.navigate(tab.title as never) as never;
+              if (tab.title === 'IP Address' || tab.title === 'Contact') {
+                setCurrentSectionId(null);
+              }
+            }}
             style={[
               styles.tabButton,
               currentTab === tab.title && styles.activeTabButton,

@@ -9,6 +9,7 @@ import PopupModal from '../../components/PopupModal';
 import {LockIcon} from '../../icons';
 import {COLORS} from '../../constants/colors';
 import {useNavigation, NavigationProp} from '@react-navigation/native';
+import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 
 // --- Define Navigation Prop Type ---
 // Assuming 'Settings' is the name of this route in your navigator stack
@@ -30,6 +31,10 @@ const SettingsTabs = () => {
   const [isPasswordRequired, setIsPasswordRequired] = useState(false);
   const [password, setPassword] = useState(['', '', '', '']);
   const [isModalVisible, setIsModalVisible] = useState(true);
+  const {setCurrentSectionId} = useCurrentSectionStore();
+  useEffect(() => {
+    setCurrentSectionId(null);
+  }, [setCurrentSectionId]);
 
   useEffect(() => {
     checkPasswordStatus();

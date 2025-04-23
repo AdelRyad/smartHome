@@ -1,4 +1,4 @@
-package com.smarthomeapp
+package com.Avante
 
 import android.app.Application
 import com.facebook.react.PackageList

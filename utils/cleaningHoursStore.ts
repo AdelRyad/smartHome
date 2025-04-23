@@ -22,14 +22,11 @@ interface CleaningHoursState {
 const useCleaningHoursStore = create<CleaningHoursState>(set => {
   const fetchCleaningHours = async (sectionId: number, ip: string) => {
     try {
-      const [setpoint, currentHours] = await Promise.all([
+      const [setpoint = 0, currentHours] = await Promise.all([
         readCleaningHoursSetpoint(ip, 502),
         readSingleLampCleaningRunHours(ip, 502),
       ]);
-      const remaining =
-        setpoint && currentHours
-          ? Math.max(0, Math.floor(setpoint - currentHours))
-          : null;
+      const remaining = Math.floor(setpoint - currentHours);
       set(state => ({
         remainingCleaningHours: {
           ...state.remainingCleaningHours,

@@ -1,4 +1,4 @@
-package com.smarthomeapp
+package com.Avante
 
 import android.app.Activity
 import android.app.admin.DevicePolicyManager

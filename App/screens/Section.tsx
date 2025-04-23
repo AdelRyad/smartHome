@@ -25,6 +25,7 @@ import {getDevicesForSection, getSectionsWithStatus} from '../../utils/db';
 import {resetLampHours, resetCleaningHours} from '../../utils/modbus';
 import useCleaningHoursStore from '../../utils/cleaningHoursStore';
 import useWorkingHoursStore from '../../utils/workingHoursStore';
+import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 
 type RouteParams = {
   sectionId: string;
@@ -58,9 +59,12 @@ export const Section = ({}) => {
 
   const useWorkingStore = useWorkingHoursStore();
   const useCleaningStore = useCleaningHoursStore();
+  const {setCurrentSectionId, currentSectionId} = useCurrentSectionStore();
 
   // Get store data for the current section
   const workingHours = useWorkingStore.workingHours[section?.id] || {};
+  console.log(workingHours, 'workingHours', section?.id);
+
   const cleaningData = useCleaningStore.remainingCleaningHours[section?.id] || {
     setpoint: null,
     current: null,
@@ -244,7 +248,10 @@ export const Section = ({}) => {
             item.id === section?.id ? COLORS.teal[500] : COLORS.gray[200],
         },
       ]}
-      onPress={() => setSection(item)}>
+      onPress={() => {
+        setSection(item);
+        setCurrentSectionId(item.id);
+      }}>
       <Text
         style={[
           styles.scrollItemText,
@@ -305,15 +312,20 @@ export const Section = ({}) => {
       name: string;
     };
   }) => {
-    const isLampActive = item.id >= 1 && item.id <= 4;
-    const hoursInfo = workingHours[item.id] || {
+    const id = item.id > 6 ? item.id - (currentSectionId - 1) * 6 : item.id;
+    const isLampActive = id >= 1 && id <= 4;
+    console.log(isLampActive, item.id, currentSectionId);
+
+    const hoursInfo = workingHours[id] || {
       currentHours: null,
       maxHours: null,
     };
+
     const currentHours = hoursInfo.currentHours ?? 0;
     const maxHours = hoursInfo.maxHours ?? 0;
+    console.log(cleaningData);
 
-    const remainingHours = Math.max(0, maxHours - currentHours);
+    const remainingHours = (cleaningData.remaining || 0).toFixed(2);
 
     let progressBarHeight = '0%';
     let progressBarColor = COLORS.gray[200];

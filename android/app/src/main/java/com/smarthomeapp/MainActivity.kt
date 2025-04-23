@@ -1,4 +1,4 @@
-package com.smarthomeapp
+package com.Avante
 
 import android.app.ActivityManager
 import android.app.admin.DevicePolicyManager
@@ -9,7 +9,7 @@ import android.view.View
 import com.facebook.react.ReactActivity
 
 class MainActivity : ReactActivity() {
-    override fun getMainComponentName(): String = "SmartHomeApp"
+    override fun getMainComponentName(): String = "Avante"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

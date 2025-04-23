@@ -1,4 +1,4 @@
-package com.smarthomeapp
+package com.Avante
 
 import android.app.admin.DeviceAdminReceiver
 import android.content.Context

@@ -26,6 +26,7 @@ import {
   readCleaningHoursSetpoint,
   setCleaningHoursSetpoint,
 } from '../../utils/modbus';
+import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 
 interface SectionSummary {
   id: number;
@@ -46,6 +47,7 @@ const CleaningScreen = () => {
   const [statusMessage, setStatusMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const {setCurrentSectionId} = useCurrentSectionStore();
 
   const logStatus = useCallback((message: string, isError = false) => {
     console.log(`[Cleaning Screen Status] ${message}`);
@@ -190,6 +192,7 @@ const CleaningScreen = () => {
         if (item.id !== selectedSection?.id && !isSaving) {
           setSelectedSection(item);
           setEdit(false);
+          setCurrentSectionId(item.id);
         }
       }}
       style={[

@@ -21,6 +21,7 @@ import {getSectionsWithStatus, updateSection} from '../../utils/db';
 import {toggleLamp} from '../../utils/modbus';
 import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 import {useStatusStore} from '../../utils/statusStore';
+import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 
 type RootStackParamList = {
   Home: undefined;
@@ -37,6 +38,7 @@ export default function Home() {
   const navigation = useNavigation<NavigationProp<RootStackParamList>>();
   const {width, height} = useWindowDimensions();
   const isPortrait = height > width;
+  const {setCurrentSectionId} = useCurrentSectionStore();
 
   const [sections, setSections] = useState<
     {
@@ -250,12 +252,13 @@ export default function Home() {
   ).length;
 
   const errorCount =
-    dpsErrorCount + pressureErrorCount + lampErrorCount + cleaningErrorCount;
+    dpsErrorCount + pressureErrorCount + lampErrorCount + cleaningErrorCount ||
+    0;
   const warningCount =
     dpsWarningCount +
-    pressureWarningCount +
-    lampWarningCount +
-    cleaningWarningCount;
+      pressureWarningCount +
+      lampWarningCount +
+      cleaningWarningCount || 0;
 
   const renderGridItem = ({item, index}: {item: any; index: number}) => {
     const status = statusBySection[item.id]?.dps.status || 'stable';
@@ -270,6 +273,7 @@ export default function Home() {
               sectionName: item.name as string,
               sectionIp: item.ip as string | null,
             });
+            setCurrentSectionId(item.id);
           } else {
             logModbusStatus(
               `Cannot navigate: Section ${item.name} is disconnected.`,

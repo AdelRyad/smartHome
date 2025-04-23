@@ -211,16 +211,31 @@ export const toggleLamp = async (
       `[toggleLamp] Received Main Response: ${mainResponse?.toString('hex')}`,
     );
 
-    // Validate main response
+    // Check the function code
     if (
       !(
         mainResponse &&
         mainResponse.length >= 12 &&
-        mainResponse[7] === functionCodeCoil &&
-        mainResponse.readUInt16BE(8) === address &&
-        mainResponse.readUInt16BE(10) === writeValue
+        mainResponse[7] === functionCodeCoil
       )
     ) {
+      throw new Error(
+        `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
+          'hex',
+        )}`,
+      );
+    }
+
+    //Check the value of the response based on the value given
+    if (value) {
+      if (mainResponse.readUInt16BE(10) != 0xff00) {
+        throw new Error(
+          `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
+            'hex',
+          )}`,
+        );
+      }
+    } else if (mainResponse.readUInt16BE(10) != 0x0000) {
       throw new Error(
         `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
           'hex',

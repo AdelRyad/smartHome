@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-               BuildableName = "SmartHomeApp.app"
-               BlueprintName = "SmartHomeApp"
-               ReferencedContainer = "container:SmartHomeApp.xcodeproj">
+               BuildableName = "Avante.app"
+               BlueprintName = "Avante"
+               ReferencedContainer = "container:Avante.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -33,9 +33,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "00E356ED1AD99517003FC87E"
-               BuildableName = "SmartHomeAppTests.xctest"
-               BlueprintName = "SmartHomeAppTests"
-               ReferencedContainer = "container:SmartHomeApp.xcodeproj">
+               BuildableName = "AvanteTests.xctest"
+               BlueprintName = "AvanteTests"
+               ReferencedContainer = "container:Avante.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -55,9 +55,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-            BuildableName = "SmartHomeApp.app"
-            BlueprintName = "SmartHomeApp"
-            ReferencedContainer = "container:SmartHomeApp.xcodeproj">
+            BuildableName = "Avante.app"
+            BlueprintName = "Avante"
+            ReferencedContainer = "container:Avante.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -72,9 +72,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-            BuildableName = "SmartHomeApp.app"
-            BlueprintName = "SmartHomeApp"
-            ReferencedContainer = "container:SmartHomeApp.xcodeproj">
+            BuildableName = "Avante.app"
+            BlueprintName = "Avante"
+            ReferencedContainer = "container:Avante.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>
