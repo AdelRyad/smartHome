@@ -1,4 +1,4 @@
-import React, {useEffect, useState, useCallback} from 'react';
+import React, {useEffect, useState, useCallback, useMemo, memo} from 'react';
 import {
   View,
   Text,
@@ -31,290 +31,49 @@ type RouteParams = {
   sectionId: string;
 };
 
-export const Section = ({}) => {
-  const route = useRoute<{key: string; name: string; params: RouteParams}>();
-  const {sectionId} = route.params;
-  const [editLifeHours, setEditLifeHours] = useState(false);
-  const [sections, setSections] = useState<
-    {id: number; name: string; ip: string; cleaningDays: number}[]
-  >([]);
-
-  const {width, height} = useWindowDimensions();
-  const isPortrait = height > width;
-
-  const [devices, setDevices] = useState<any>(null);
-  const [section, setSection] = useState<any>({
-    id: sectionId,
-  });
-  const [selectedDevices, setSelectedDevices] = useState<any[]>([]);
-  const [password, setPassword] = useState(['', '', '', '']);
-  const [isPasswordRequired, setIsPasswordRequired] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('');
-  const [modalMode, setModalMode] = useState<'resetLamp' | 'cleaning' | null>(
-    null,
-  );
-
-  const [isResettingCleaningHours, setIsResettingCleaningHours] =
-    useState(false);
-
-  const useWorkingStore = useWorkingHoursStore();
-  const useCleaningStore = useCleaningHoursStore();
-  const {setCurrentSectionId, currentSectionId} = useCurrentSectionStore();
-
-  // Get store data for the current section
-  const workingHours = useWorkingStore.workingHours[section?.id] || {};
-  console.log(workingHours, 'workingHours', section?.id);
-
-  const cleaningData = useCleaningStore.remainingCleaningHours[section?.id] || {
-    setpoint: null,
-    current: null,
-    remaining: null,
-  };
-
-  const logStatus = useCallback((message: string, isError = false) => {
-    console.log(`[Section Screen Status] ${message}`);
-    setStatusMessage(message);
-    setTimeout(() => setStatusMessage(''), isError ? 3000 : 1000);
-  }, []);
-
-  const handleKeyPress = (key: string | number) => {
-    let newPassword = [...password];
-
-    if (key === 'DEL') {
-      let lastFilledIndex = -1;
-      for (let i = newPassword.length - 1; i >= 0; i--) {
-        if (newPassword[i] !== '') {
-          lastFilledIndex = i;
-          break;
-        }
-      }
-      if (lastFilledIndex >= 0) {
-        newPassword[lastFilledIndex] = '';
-      }
-    } else {
-      const firstEmptyIndex = newPassword.findIndex(p => p === '');
-      if (firstEmptyIndex !== -1) {
-        newPassword[firstEmptyIndex] = key.toString();
-      }
-    }
-
-    setPassword(newPassword);
-
-    if (newPassword.join('') === '2826') {
-      setIsPasswordRequired(false);
-      setPassword(['', '', '', '']);
-      setModalMode('resetLamp');
-    }
-  };
-
-  useEffect(() => {
-    getSectionsWithStatus(fetchedSections => {
-      const sectionsWithIp = fetchedSections
-        .filter(section => section.ip && section.ip.trim() !== '')
-        .map(section => ({
-          id: section.id!,
-          name: section.name,
-          ip: section.ip!,
-          cleaningDays: section.cleaningDays,
-        }));
-      setSections(sectionsWithIp);
-
-      const currentSection = sectionsWithIp.find(sec => sec.id === +sectionId);
-      if (currentSection) {
-        setSection(currentSection);
-      } else if (sectionsWithIp.length > 0) {
-        setSection(sectionsWithIp[0]);
-      } else {
-        logStatus('No sections with valid IP addresses found.', true);
-        setSection(null);
-        setDevices([]);
-      }
-    });
-  }, [sectionId, logStatus]);
-
-  useEffect(() => {
-    if (section?.ip) {
-      const fetchData = async () => {
-        try {
-          const devicesFromDb = await new Promise<any[] | null>(resolve => {
-            getDevicesForSection(+section.id, resolve);
-          });
-
-          if (!devicesFromDb) {
-            throw new Error('No devices found');
-          }
-          setDevices(devicesFromDb);
-        } catch (error: any) {
-          logStatus(
-            `Error fetching data: ${error?.message || String(error)}`,
-            true,
-          );
-          setDevices([]);
-        }
-      };
-
-      fetchData();
-    } else {
-      setDevices([]);
-    }
-  }, [section, logStatus]);
-
-  const handleResetCleaningHours = async () => {
-    if (!section?.ip || isResettingCleaningHours) {
-      logStatus(
-        isResettingCleaningHours ? 'Reset already in progress.' : 'IP Missing',
-        true,
-      );
-      return;
-    }
-    setIsResettingCleaningHours(true);
-    setModalMode(null);
-    logStatus('Resetting section cleaning hours...');
-    try {
-      await resetCleaningHours(section.ip, 502, logStatus);
-      logStatus('Cleaning reset command sent to PLC.');
-    } catch (error: any) {
-      logStatus(
-        `Cleaning reset failed: ${error?.message || String(error)}`,
-        true,
-      );
-    } finally {
-      setIsResettingCleaningHours(false);
-    }
-  };
-
-  const resetAllCoilsToSetpoint = async () => {
-    if (!section?.ip || isResettingCleaningHours) {
-      logStatus(
-        isResettingCleaningHours ? 'Reset already in progress.' : 'IP Missing',
-        true,
-      );
-      return;
-    }
-
-    setModalMode('cleaning'); // Show the confirmation modal
-  };
-
-  const executeLampReset = async () => {
-    if (!section || !section.ip || selectedDevices.length === 0) {
-      logStatus(
-        'Cannot reset lamp hours: Section/IP missing or no lamps selected.',
-        true,
-      );
-      setModalMode(null);
-      return;
-    }
-    setModalMode(null);
-    logStatus(
-      `Resetting LIFE hours for ${selectedDevices.length} selected lamps...`,
-    );
-
-    const resetPromises = selectedDevices.map((device: {id: number}) => {
-      const lampIndexToReset = device.id;
-      if (lampIndexToReset >= 1 && lampIndexToReset <= 4) {
-        return resetLampHours(section.ip, 502, lampIndexToReset, logStatus)
-          .then(() => {
-            // Update Zustand store or UI state if needed
-          })
-          .catch(error => {
-            logStatus(
-              `Reset failed for Lamp ${lampIndexToReset}: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-              true,
-            );
-          });
-      } else {
-        return Promise.resolve();
-      }
-    });
-
-    await Promise.allSettled(resetPromises);
-    logStatus('Finished LIFE reset attempts.');
-    setEditLifeHours(false);
-    setSelectedDevices([]);
-  };
-
-  const renderScrollItem = ({
-    item,
+// Memoized components
+const KeyButton = memo(
+  ({
+    num,
+    onPress,
   }: {
-    item: {id: number; name: string; ip: string; cleaningDays: number};
+    num: string | number;
+    onPress: (key: string | number) => void;
   }) => (
-    <TouchableOpacity
-      style={[
-        styles.scrollItem,
-        {
-          borderLeftColor:
-            item.id === section?.id ? COLORS.teal[500] : COLORS.gray[200],
-        },
-      ]}
-      onPress={() => {
-        setSection(item);
-        setCurrentSectionId(item.id);
-      }}>
-      <Text
-        style={[
-          styles.scrollItemText,
-          {
-            color:
-              item.id === section?.id ? COLORS.teal[500] : COLORS.gray[700],
-          },
-        ]}>
-        {item.name}
-      </Text>
+    <TouchableOpacity style={styles.keyButton} onPress={() => onPress(num)}>
+      <Text style={styles.keyText}>{num}</Text>
     </TouchableOpacity>
-  );
+  ),
+);
 
-  const renderSelectedDevices = ({
-    item,
-  }: {
-    item: {id: number; name: string};
-  }) => (
-    <View
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-      }}>
-      <View style={{flexDirection: 'row', alignItems: 'center', gap: 8}}>
-        <View style={styles.iconContainer}>
-          {<LampIcon fill={'black'} width={26} height={26} />}
-        </View>
-        <Text>{item.name}</Text>
-      </View>
-      <TouchableOpacity
-        style={{
-          padding: 6,
-          backgroundColor: COLORS.error[50],
-          borderRadius: 50,
-          width: 30,
-          height: 30,
-          justifyContent: 'center',
-          alignItems: 'center',
-        }}
-        onPress={() =>
-          setSelectedDevices(
-            selectedDevices.filter(
-              (device: {id: number}) => device.id !== item.id,
-            ),
-          )
-        }>
-        <RemoveIcon fill={COLORS.error[600]} width={11} height={11} />
-      </TouchableOpacity>
-    </View>
-  );
+const OtpDigit = memo(({digit}: {digit: string}) => (
+  <View style={styles.otpBox}>
+    <Text style={styles.otpText}>{digit}</Text>
+  </View>
+));
 
-  const renderGridItem = ({
+const GridItem = memo(
+  ({
     item,
+    editLifeHours,
+    selectedDevices,
+    workingHours,
+    cleaningData,
+    currentSectionId,
+    onSelectDevice,
+    onLongPress,
   }: {
-    item: {
-      id: number;
-      name: string;
-    };
+    item: any;
+    editLifeHours: boolean;
+    selectedDevices: any[];
+    workingHours: any;
+    cleaningData: any;
+    currentSectionId: number;
+    onSelectDevice: (item: any) => void;
+    onLongPress: (item: any) => void;
   }) => {
     const id = item.id > 6 ? item.id - (currentSectionId - 1) * 6 : item.id;
     const isLampActive = id >= 1 && id <= 4;
-    console.log(isLampActive, item.id, currentSectionId);
 
     const hoursInfo = workingHours[id] || {
       currentHours: null,
@@ -323,46 +82,33 @@ export const Section = ({}) => {
 
     const currentHours = hoursInfo.currentHours ?? 0;
     const maxHours = hoursInfo.maxHours ?? 0;
-    console.log(cleaningData);
-
     const remainingHours = (cleaningData.remaining || 0).toFixed(2);
 
-    let progressBarHeight = '0%';
-    let progressBarColor = COLORS.gray[200];
-    if (isLampActive && hoursInfo.currentHours !== null) {
+    const progressBarHeight = useMemo(() => {
+      if (!isLampActive || hoursInfo.currentHours === null) return '0%';
       const progress = 100 - (currentHours / maxHours) * 100;
-      progressBarHeight = `${progress}%`;
-      progressBarColor = COLORS.error[600];
-      if (progress >= 75) {
-        progressBarColor = COLORS.good[700];
-      } else if (progress >= 50) {
-        progressBarColor = COLORS.warning[500];
-      }
-    }
+      return `${progress}%`;
+    }, [isLampActive, hoursInfo.currentHours, currentHours, maxHours]);
+
+    const progressBarColor = useMemo(() => {
+      if (!isLampActive || hoursInfo.currentHours === null)
+        return COLORS.gray[200];
+      const progress = 100 - (currentHours / maxHours) * 100;
+      if (progress >= 75) return COLORS.good[700];
+      if (progress >= 50) return COLORS.warning[500];
+      return COLORS.error[600];
+    }, [isLampActive, hoursInfo.currentHours, currentHours, maxHours]);
+
+    const isSelected = useMemo(
+      () => selectedDevices.some(d => d.id === item.id),
+      [selectedDevices, item.id],
+    );
 
     return (
       <TouchableOpacity
-        onLongPress={
-          isLampActive
-            ? () => {
-                setEditLifeHours(true);
-                setSelectedDevices([item]);
-              }
-            : undefined
-        }
+        onLongPress={isLampActive ? () => onLongPress(item) : undefined}
         onPress={
-          editLifeHours && isLampActive
-            ? () => {
-                const isSelected = selectedDevices.some(d => d.id === item.id);
-                if (isSelected) {
-                  setSelectedDevices(prev =>
-                    prev.filter(d => d.id !== item.id),
-                  );
-                } else {
-                  setSelectedDevices(prev => [...prev, item]);
-                }
-              }
-            : undefined
+          editLifeHours && isLampActive ? () => onSelectDevice(item) : undefined
         }
         disabled={!isLampActive}
         style={[styles.gridItem, !isLampActive && {opacity: 0.5}]}>
@@ -373,12 +119,9 @@ export const Section = ({}) => {
                 <View
                   style={[
                     styles.checkbox,
-                    selectedDevices.some(d => d.id === item.id) &&
-                      styles.selectedCheckbox,
+                    isSelected && styles.selectedCheckbox,
                   ]}>
-                  {selectedDevices.some(d => d.id === item.id) && (
-                    <CheckIcon3 />
-                  )}
+                  {isSelected && <CheckIcon3 />}
                 </View>
               ) : (
                 <View style={styles.iconContainer}>
@@ -414,7 +157,7 @@ export const Section = ({}) => {
                   {
                     height: progressBarHeight,
                     backgroundColor: progressBarColor,
-                  } as any,
+                  },
                 ]}
               />
             )}
@@ -422,73 +165,356 @@ export const Section = ({}) => {
         </View>
       </TouchableOpacity>
     );
-  };
+  },
+);
+
+const Section = () => {
+  const route = useRoute<{key: string; name: string; params: RouteParams}>();
+  const {sectionId} = route.params;
+  const {width, height} = useWindowDimensions();
+  const isPortrait = height > width;
+
+  // State management
+  const [editLifeHours, setEditLifeHours] = useState(false);
+  const [sections, setSections] = useState<
+    {id: number; name: string; ip: string; cleaningDays: number}[]
+  >([]);
+  const [devices, setDevices] = useState<any>(null);
+  const [section, setSection] = useState<any>({id: sectionId});
+  const [selectedDevices, setSelectedDevices] = useState<any[]>([]);
+  const [password, setPassword] = useState(['', '', '', '']);
+  const [isPasswordRequired, setIsPasswordRequired] = useState(false);
+  const [statusMessage, setStatusMessage] = useState('');
+  const [modalMode, setModalMode] = useState<'resetLamp' | 'cleaning' | null>(
+    null,
+  );
+  const [isResettingCleaningHours, setIsResettingCleaningHours] =
+    useState(false);
+
+  // Store hooks
+  const useWorkingStore = useWorkingHoursStore();
+  const useCleaningStore = useCleaningHoursStore();
+  const {setCurrentSectionId, currentSectionId} = useCurrentSectionStore();
+
+  // Derived data
+  const workingHours = useMemo(
+    () => useWorkingStore.workingHours[section?.id] || {},
+    [useWorkingStore.workingHours, section?.id],
+  );
+  console.log('Working Hours:', workingHours);
+
+  const cleaningData = useMemo(
+    () =>
+      useCleaningStore.remainingCleaningHours[section?.id] || {
+        setpoint: null,
+        current: null,
+        remaining: null,
+      },
+    [useCleaningStore.remainingCleaningHours, section?.id],
+  );
+
+  // Memoized keypad layout
+  const keypadLayout = useMemo(
+    () => [
+      [1, 2, 3],
+      [4, 5, 6],
+      [7, 8, 9],
+      ['0', 'DEL'],
+    ],
+    [],
+  );
+
+  // Callbacks
+  const logStatus = useCallback((message: string, isError = false) => {
+    setStatusMessage(message);
+    setTimeout(() => setStatusMessage(''), isError ? 3000 : 1000);
+  }, []);
+
+  const handleKeyPress = useCallback((key: string | number) => {
+    setPassword(prevPassword => {
+      const newPassword = [...prevPassword];
+
+      if (key === 'DEL') {
+        const lastFilledIndex = newPassword.reduceRight(
+          (acc, curr, index) => (curr !== '' && acc === -1 ? index : acc),
+          -1,
+        );
+
+        if (lastFilledIndex >= 0) {
+          newPassword[lastFilledIndex] = '';
+        }
+      } else {
+        const firstEmptyIndex = newPassword.indexOf('');
+        if (firstEmptyIndex !== -1) {
+          newPassword[firstEmptyIndex] = key.toString();
+        }
+      }
+
+      if (newPassword.join('') === '2826') {
+        setIsPasswordRequired(false);
+        setPassword(['', '', '', '']);
+        setModalMode('resetLamp');
+      }
+
+      return newPassword;
+    });
+  }, []);
+
+  const handleModalClose = useCallback(() => {
+    setIsPasswordRequired(false);
+  }, []);
+
+  const handleResetCleaningHours = useCallback(async () => {
+    if (!section?.ip || isResettingCleaningHours) {
+      logStatus(
+        isResettingCleaningHours ? 'Reset already in progress.' : 'IP Missing',
+        true,
+      );
+      return;
+    }
+    setIsResettingCleaningHours(true);
+    setModalMode(null);
+    logStatus('Resetting section cleaning hours...');
+    try {
+      await resetCleaningHours(section.ip, 502, logStatus);
+      logStatus('Cleaning reset command sent to PLC.');
+    } catch (error: any) {
+      logStatus(
+        `Cleaning reset failed: ${error?.message || String(error)}`,
+        true,
+      );
+    } finally {
+      setIsResettingCleaningHours(false);
+    }
+  }, [section?.ip, isResettingCleaningHours, logStatus]);
+
+  const resetAllCoilsToSetpoint = useCallback(() => {
+    if (!section?.ip || isResettingCleaningHours) {
+      logStatus(
+        isResettingCleaningHours ? 'Reset already in progress.' : 'IP Missing',
+        true,
+      );
+      return;
+    }
+    setModalMode('cleaning');
+  }, [section?.ip, isResettingCleaningHours, logStatus]);
+
+  const executeLampReset = useCallback(async () => {
+    if (!section || !section.ip || selectedDevices.length === 0) {
+      logStatus(
+        'Cannot reset lamp hours: Section/IP missing or no lamps selected.',
+        true,
+      );
+      setModalMode(null);
+      return;
+    }
+    setModalMode(null);
+    logStatus(
+      `Resetting LIFE hours for ${selectedDevices.length} selected lamps...`,
+    );
+
+    const resetPromises = selectedDevices.map((device: {id: number}) => {
+      const lampIndexToReset = device.id;
+      if (lampIndexToReset >= 1 && lampIndexToReset <= 4) {
+        return resetLampHours(
+          section.ip,
+          502,
+          lampIndexToReset,
+          logStatus,
+        ).catch(error => {
+          logStatus(
+            `Reset failed for Lamp ${lampIndexToReset}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            true,
+          );
+        });
+      }
+      return Promise.resolve();
+    });
+
+    await Promise.allSettled(resetPromises);
+    logStatus('Finished LIFE reset attempts.');
+    setEditLifeHours(false);
+    setSelectedDevices([]);
+  }, [section, selectedDevices, logStatus]);
+
+  const handleSelectDevice = useCallback((item: any) => {
+    setSelectedDevices(prev => {
+      const isSelected = prev.some(d => d.id === item.id);
+      return isSelected ? prev.filter(d => d.id !== item.id) : [...prev, item];
+    });
+  }, []);
+
+  const handleLongPress = useCallback((item: any) => {
+    setEditLifeHours(true);
+    setSelectedDevices([item]);
+  }, []);
+
+  // Effects
+  useEffect(() => {
+    getSectionsWithStatus(fetchedSections => {
+      const sectionsWithIp = fetchedSections
+        .filter(section => section.ip && section.ip.trim() !== '')
+        .map(section => ({
+          id: section.id!,
+          name: section.name,
+          ip: section.ip!,
+          cleaningDays: section.cleaningDays,
+        }));
+      setSections(sectionsWithIp);
+
+      const currentSection = sectionsWithIp.find(sec => sec.id === +sectionId);
+      if (currentSection) {
+        setSection(currentSection);
+      } else if (sectionsWithIp.length > 0) {
+        setSection(sectionsWithIp[0]);
+      } else {
+        logStatus('No sections with valid IP addresses found.', true);
+        setSection(null);
+        setDevices([]);
+      }
+    });
+  }, [sectionId, logStatus]);
+
+  useEffect(() => {
+    if (section?.ip) {
+      const fetchData = async () => {
+        try {
+          const devicesFromDb = await new Promise<any[] | null>(resolve => {
+            getDevicesForSection(+section.id, resolve);
+          });
+          setDevices(devicesFromDb || []);
+        } catch (error: any) {
+          logStatus(
+            `Error fetching data: ${error?.message || String(error)}`,
+            true,
+          );
+          setDevices([]);
+        }
+      };
+      fetchData();
+    } else {
+      setDevices([]);
+    }
+  }, [section, logStatus]);
+
+  // Render functions
+  const renderScrollItem = useCallback(
+    ({item}: {item: any}) => (
+      <TouchableOpacity
+        style={[
+          styles.scrollItem,
+          {
+            borderLeftColor:
+              item.id === section?.id ? COLORS.teal[500] : COLORS.gray[200],
+          },
+        ]}
+        onPress={() => {
+          setSection(item);
+          setCurrentSectionId(item.id);
+        }}>
+        <Text
+          style={[
+            styles.scrollItemText,
+            {
+              color:
+                item.id === section?.id ? COLORS.teal[500] : COLORS.gray[700],
+            },
+          ]}>
+          {item.name}
+        </Text>
+      </TouchableOpacity>
+    ),
+    [section?.id, setCurrentSectionId],
+  );
+
+  const renderSelectedDevices = useCallback(
+    ({item}: {item: any}) => (
+      <View style={styles.selectedDeviceContainer}>
+        <View style={styles.selectedDeviceInfo}>
+          <View style={styles.iconContainer}>
+            <LampIcon fill={'black'} width={26} height={26} />
+          </View>
+          <Text>{item.name}</Text>
+        </View>
+        <TouchableOpacity
+          style={styles.removeButton}
+          onPress={() =>
+            setSelectedDevices(prev =>
+              prev.filter(device => device.id !== item.id),
+            )
+          }>
+          <RemoveIcon fill={COLORS.error[600]} width={11} height={11} />
+        </TouchableOpacity>
+      </View>
+    ),
+    [],
+  );
+
+  const renderKeyRow = useCallback(
+    (row: (string | number)[]) => (
+      <View key={row.join('-')} style={styles.keyRow}>
+        {row.map(num => (
+          <KeyButton key={num} num={num} onPress={handleKeyPress} />
+        ))}
+      </View>
+    ),
+    [handleKeyPress],
+  );
+
+  const renderGridItem = useCallback(
+    ({item}: {item: any}) => (
+      <GridItem
+        item={item}
+        editLifeHours={editLifeHours}
+        selectedDevices={selectedDevices}
+        workingHours={workingHours}
+        cleaningData={cleaningData}
+        currentSectionId={currentSectionId}
+        onSelectDevice={handleSelectDevice}
+        onLongPress={handleLongPress}
+      />
+    ),
+    [
+      editLifeHours,
+      selectedDevices,
+      workingHours,
+      cleaningData,
+      currentSectionId,
+      handleSelectDevice,
+      handleLongPress,
+    ],
+  );
 
   return (
     <Layout>
-      {statusMessage ? (
-        <View
-          style={{
-            position: 'absolute',
-            bottom: 20,
-            left: 20,
-            right: 20,
-            backgroundColor: COLORS.gray[800],
-            padding: 16,
-            borderRadius: 8,
-            zIndex: 100,
-          }}>
-          <Text style={{color: 'white', textAlign: 'center'}}>
-            {statusMessage}
-          </Text>
+      {statusMessage && (
+        <View style={styles.statusMessageContainer}>
+          <Text style={styles.statusMessageText}>{statusMessage}</Text>
         </View>
-      ) : null}
+      )}
 
       <PopupModal
         hideAcitons={true}
         visible={isPasswordRequired}
-        onClose={() => {
-          setIsPasswordRequired(false);
-        }}
+        onClose={handleModalClose}
         title="Enter Password"
         onConfirm={() => {}}
         Icon={LockIcon}>
         <View style={styles.otpContainer}>
           {password.map((digit, index) => (
-            <View key={index} style={styles.otpBox}>
-              <Text style={styles.otpText}>{digit}</Text>
-            </View>
+            <OtpDigit key={index} digit={digit} />
           ))}
         </View>
-        <View style={styles.keypad}>
-          {[
-            [1, 2, 3],
-            [4, 5, 6],
-            [7, 8, 9],
-            ['0', 'DEL'],
-          ].map((row, rowIndex) => (
-            <View key={rowIndex} style={styles.keyRow}>
-              {row.map((num, index) => (
-                <TouchableOpacity
-                  key={index}
-                  style={styles.keyButton}
-                  onPress={() => handleKeyPress(num)}>
-                  <Text style={styles.keyText}>{num}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          ))}
-        </View>
+        <View style={styles.keypad}>{keypadLayout.map(renderKeyRow)}</View>
       </PopupModal>
 
       <PopupModal
         visible={modalMode !== null}
         onConfirm={() => {
-          if (modalMode === 'cleaning') {
-            handleResetCleaningHours();
-          } else if (modalMode === 'resetLamp') {
-            executeLampReset();
-          }
+          if (modalMode === 'cleaning') handleResetCleaningHours();
+          else if (modalMode === 'resetLamp') executeLampReset();
         }}
         onClose={() => setModalMode(null)}
         title="Confirmation needed"
@@ -539,7 +565,7 @@ export const Section = ({}) => {
                   </View>
                 );
               }}
-              keyExtractor={item => item.id.toString()}
+              keyExtractor={item => item.id}
               style={styles.modalDeviceList}
             />
           </View>
@@ -553,7 +579,7 @@ export const Section = ({}) => {
               <FlatList
                 data={selectedDevices}
                 renderItem={renderSelectedDevices}
-                keyExtractor={item => item.id.toString()}
+                keyExtractor={item => item.id}
                 showsVerticalScrollIndicator={false}
                 ListHeaderComponent={() => (
                   <Text style={styles.selectedTitle}>Selected Lamps</Text>
@@ -640,12 +666,7 @@ export const Section = ({}) => {
             contentContainerStyle={styles.gridContentContainer}
             showsVerticalScrollIndicator={false}
             ListEmptyComponent={
-              <View
-                style={{
-                  flex: 1,
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}>
+              <View style={styles.emptyListContainer}>
                 <Text>
                   {devices === null ? 'Loading...' : 'No Devices Found'}
                 </Text>
@@ -655,6 +676,9 @@ export const Section = ({}) => {
               editLifeHours,
               selectedDevices,
             }}
+            initialNumToRender={10}
+            maxToRenderPerBatch={10}
+            windowSize={5}
           />
         </View>
       </View>
@@ -663,6 +687,44 @@ export const Section = ({}) => {
 };
 
 const styles = StyleSheet.create({
+  selectedDeviceContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  selectedDeviceInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  removeButton: {
+    padding: 6,
+    backgroundColor: COLORS.error[50],
+    borderRadius: 50,
+    width: 30,
+    height: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  statusMessageContainer: {
+    position: 'absolute',
+    bottom: 20,
+    left: 20,
+    right: 20,
+    backgroundColor: COLORS.gray[800],
+    padding: 16,
+    borderRadius: 8,
+    zIndex: 100,
+  },
+  statusMessageText: {
+    color: 'white',
+    textAlign: 'center',
+  },
+  emptyListContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   container: {
     flex: 1,
     backgroundColor: '#fff',
@@ -977,4 +1039,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default Section;
+export default memo(Section);

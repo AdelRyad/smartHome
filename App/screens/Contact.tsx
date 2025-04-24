@@ -1,5 +1,11 @@
-import React, {useEffect, useState} from 'react';
-import {View, Text, StyleSheet, FlatList} from 'react-native';
+import React, {useEffect, useState, useMemo, memo, useCallback} from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  FlatList,
+  useWindowDimensions,
+} from 'react-native';
 import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
 import {
@@ -10,7 +16,6 @@ import {
   QRIcon,
   RefrenceIcon,
 } from '../../icons';
-import {useWindowDimensions} from 'react-native';
 import {getContactInfo} from '../../utils/db';
 
 // Define the ContactField type
@@ -21,49 +26,27 @@ type ContactField = {
   type: string;
 };
 
-const ContactUsScreen = () => {
-  const {width, height} = useWindowDimensions();
-  const isPortrait = height > width;
-  type ContactInfo = {
-    email?: string;
-    phone?: string;
-    project_refrence?: string;
-    hood_refrence?: string;
-    commission_date?: string;
-  };
+type ContactInfo = {
+  email?: string;
+  phone?: string;
+  project_refrence?: string;
+  hood_refrence?: string;
+  commission_date?: string;
+};
 
-  const [contactInfo, setContactInfo] = useState<ContactInfo | null>(null);
-  useEffect(() => {
-    getContactInfo(contact => setContactInfo(contact));
-  }, []);
-
-  const contactFields = [
-    {
-      key: 'project_refrence',
-      title: 'Project reference',
-      icon: RefrenceIcon,
-      type: 'text',
-    },
-    {
-      key: 'hood_refrence',
-      title: 'Hood reference',
-      icon: RefrenceIcon,
-      type: 'text',
-    },
-    {
-      key: 'commission_date',
-      title: 'Commission Date',
-      icon: CalednarIocn,
-      type: 'date',
-    },
-    {key: 'phone', title: 'Phone Number', icon: CallIcon, type: 'phone'},
-  ];
-  // Render item for the grid
-  const renderGridItem = ({item}: {item: ContactField}) => {
+// Memoized components
+const ContactCard = memo(
+  ({
+    item,
+    contactInfo,
+  }: {
+    item: ContactField;
+    contactInfo: ContactInfo | null;
+  }) => {
     const value = contactInfo ? contactInfo[item.key as keyof ContactInfo] : '';
 
     return (
-      <View style={[styles.gridItem, {maxWidth: isPortrait ? '100%' : '49%'}]}>
+      <View style={styles.gridItem}>
         <View style={styles.card}>
           <View style={styles.cardContent}>
             <View style={styles.cardHeader}>
@@ -73,7 +56,7 @@ const ContactUsScreen = () => {
               <Text style={styles.cardSubText}>{item.title}</Text>
             </View>
             <Text style={styles.cardTitle}>
-              {item.type === 'date'
+              {item.type === 'date' && value
                 ? new Date(value).toLocaleDateString()
                 : value}
             </Text>
@@ -81,7 +64,100 @@ const ContactUsScreen = () => {
         </View>
       </View>
     );
-  };
+  },
+);
+
+const EmailCard = memo(({email}: {email?: string}) => (
+  <View style={[styles.gridItem, styles.emailCard]}>
+    <View style={styles.card}>
+      <View style={styles.emailCardContent}>
+        <View style={styles.cardHeader}>
+          <View style={styles.cardIconWrapper}>
+            <MailIcon fill={'black'} style={styles.cardIcon} />
+          </View>
+          <Text style={styles.cardSubText}>Email Address</Text>
+        </View>
+        <Text style={styles.cardTitle}>{email}</Text>
+      </View>
+    </View>
+  </View>
+));
+
+const QRCodeSection = memo(() => (
+  <View style={styles.qrCodeContainer}>
+    <View style={styles.qrCodeBorderTop}>
+      <View style={styles.qrCodeCornerLeft} />
+      <View style={styles.qrCodeCornerRight} />
+    </View>
+    <View style={styles.qrCodeWrapper}>
+      <QrCode />
+    </View>
+    <View style={styles.qrCodeBorderBottom}>
+      <View
+        style={[styles.qrCodeCornerLeft, {transform: [{rotate: '-90deg'}]}]}
+      />
+      <View
+        style={[styles.qrCodeCornerRight, {transform: [{rotate: '90deg'}]}]}
+      />
+    </View>
+    <View style={styles.qrCodeLine} />
+  </View>
+));
+
+const QRCodeInfo = memo(() => (
+  <View style={styles.qrCodeInfo}>
+    <View style={styles.cardIconWrapper}>
+      <QRIcon fill={'black'} style={styles.cardIcon} />
+    </View>
+    <View style={styles.qrCodeTextContainer}>
+      <Text style={styles.cardTitle}>QR Code</Text>
+      <Text style={styles.cardSubText}>Scan QR code to reach out to us</Text>
+    </View>
+  </View>
+));
+
+const ContactUsScreen = () => {
+  const {width, height} = useWindowDimensions();
+  const isPortrait = height > width;
+  const [contactInfo, setContactInfo] = useState<ContactInfo | null>(null);
+
+  useEffect(() => {
+    getContactInfo(contact => setContactInfo(contact));
+  }, []);
+
+  // Memoize contact fields to prevent recreation on every render
+  const contactFields = useMemo(
+    () => [
+      {
+        key: 'project_refrence',
+        title: 'Project reference',
+        icon: RefrenceIcon,
+        type: 'text',
+      },
+      {
+        key: 'hood_refrence',
+        title: 'Hood reference',
+        icon: RefrenceIcon,
+        type: 'text',
+      },
+      {
+        key: 'commission_date',
+        title: 'Commission Date',
+        icon: CalednarIocn,
+        type: 'date',
+      },
+      {key: 'phone', title: 'Phone Number', icon: CallIcon, type: 'phone'},
+    ],
+    [],
+  );
+
+  const renderGridItem = useCallback(
+    ({item}: {item: ContactField}) => (
+      <ContactCard item={item} contactInfo={contactInfo} />
+    ),
+    [contactInfo],
+  );
+
   return (
     <Layout>
       <View style={styles.header}>
@@ -96,75 +172,31 @@ const ContactUsScreen = () => {
           {flexDirection: isPortrait ? 'column-reverse' : 'row'},
         ]}>
         <View style={styles.gridContainer}>
-          <View>
-            <FlatList
-              key={isPortrait ? 'portrait' : 'landscape'} // Forces re-render
-              numColumns={isPortrait ? 1 : 2}
-              data={contactFields}
-              renderItem={renderGridItem}
-              keyExtractor={item => item.key}
-              columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
-              contentContainerStyle={styles.gridContentContainer}
-              showsVerticalScrollIndicator={false}
-            />
-          </View>
-          <View style={[styles.gridItem, styles.emailCard]}>
-            <View style={styles.card}>
-              <View style={styles.emailCardContent}>
-                <View style={styles.cardHeader}>
-                  <View style={styles.cardIconWrapper}>
-                    <MailIcon fill={'black'} style={styles.cardIcon} />
-                  </View>
-                  <Text style={styles.cardSubText}>Email Adress</Text>
-                </View>
-                <Text style={styles.cardTitle}>{contactInfo?.email}</Text>
-              </View>
-            </View>
-          </View>
+          <FlatList
+            key={isPortrait ? 'portrait' : 'landscape'}
+            numColumns={isPortrait ? 1 : 2}
+            data={contactFields}
+            renderItem={renderGridItem}
+            keyExtractor={item => item.key}
+            columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
+            contentContainerStyle={styles.gridContentContainer}
+            showsVerticalScrollIndicator={false}
+            initialNumToRender={4}
+            maxToRenderPerBatch={4}
+            windowSize={5}
+          />
+          <EmailCard email={contactInfo?.email} />
         </View>
         <View style={[styles.scrollContainer, {flex: 1, gap: 56}]}>
-          <View style={styles.qrCodeContainer}>
-            <View style={styles.qrCodeBorderTop}>
-              <View style={styles.qrCodeCornerLeft} />
-              <View style={styles.qrCodeCornerRight} />
-            </View>
-            <View style={styles.qrCodeWrapper}>
-              <QrCode />
-            </View>
-            <View style={styles.qrCodeBorderBottom}>
-              <View
-                style={[
-                  styles.qrCodeCornerLeft,
-                  {transform: [{rotate: '-90deg'}]},
-                ]}
-              />
-              <View
-                style={[
-                  styles.qrCodeCornerRight,
-                  {transform: [{rotate: '90deg'}]},
-                ]}
-              />
-            </View>
-            <View style={styles.qrCodeLine} />
-          </View>
-
-          <View style={styles.qrCodeInfo}>
-            <View style={styles.cardIconWrapper}>
-              <QRIcon fill={'black'} style={styles.cardIcon} />
-            </View>
-            <View style={styles.qrCodeTextContainer}>
-              <Text style={styles.cardTitle}>QR Code</Text>
-              <Text style={styles.cardSubText}>
-                Scan QR code to reach out to us
-              </Text>
-            </View>
-          </View>
+          <QRCodeSection />
+          <QRCodeInfo />
         </View>
       </View>
     </Layout>
   );
 };
 
+// Styles remain the same as in your original code
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -322,4 +354,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default ContactUsScreen;
+export default memo(ContactUsScreen);

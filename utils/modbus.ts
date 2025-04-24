@@ -1,177 +1,223 @@
 import TcpSocket from 'react-native-tcp-socket';
-import {Buffer} from 'buffer'; // Make sure to import Buffer
-
-// --- Define Shared Types ---
-interface LampHours {
-  currentHours: number;
-}
+import {Buffer} from 'buffer';
 
 // --- Configuration ---
 const MODBUS_UNIT_ID = 1;
+const DEFAULT_TIMEOUT = 3000; // 3 seconds timeout
+const MAX_RETRIES = 2; // Maximum retry attempts
 
-// --- Helper Functions (Updated for FC16 Write Multiple Registers) ---
+// --- Helper Functions ---
 
 /**
- * Creates a Modbus TCP request buffer (MBAP Header + PDU).
- * Addresses passed to this function should be 0-based.
+ * Creates a Modbus TCP request buffer
  */
 const createModbusRequest = (
-  unitId: number, // Modbus unit ID
-  functionCode: number, // Modbus function code
-  startAddress: number, // Register address (0-based)
-  quantity: number, // Number of items (coils/registers) OR the value for single writes (FC5, FC6)
-  writeData?: Buffer, // Data buffer for multiple write operations (FC15, FC16)
+  unitId: number,
+  functionCode: number,
+  startAddress: number,
+  quantity: number,
+  writeData?: Buffer,
 ): Buffer => {
   let pdu: Buffer;
 
-  if (
-    functionCode === 0x01 ||
-    functionCode === 0x02 ||
-    functionCode === 0x03 ||
-    functionCode === 0x04
-  ) {
-    // Read Coils/Inputs/Registers: FC(1), StartAddr(2), Quantity(2)
+  if ([0x01, 0x02, 0x03, 0x04].includes(functionCode)) {
     pdu = Buffer.alloc(5);
     pdu.writeUInt8(functionCode, 0);
     pdu.writeUInt16BE(startAddress, 1);
     pdu.writeUInt16BE(quantity, 3);
-  } else if (functionCode === 0x05) {
-    // Write Single Coil
-    // FC(1), Addr(2), Value(2 - 0xFF00/0x0000)
+  } else if (functionCode === 0x05 || functionCode === 0x06) {
     pdu = Buffer.alloc(5);
-    pdu.writeUInt8(functionCode, 0);
-    pdu.writeUInt16BE(startAddress, 1);
-    pdu.writeUInt16BE(quantity, 3); // quantity holds the value
-  } else if (functionCode === 0x06) {
-    // Write Single Register
-    // FC(1), Addr(2), Value(2)
-    pdu = Buffer.alloc(5);
-    pdu.writeUInt8(functionCode, 0);
-    pdu.writeUInt16BE(startAddress, 1);
-    pdu.writeUInt16BE(quantity, 3); // quantity holds the value
-  } else if (functionCode === 0x0f && writeData) {
-    // Write Multiple Coils
-    // FC(1), StartAddr(2), QuantityCoils(2), ByteCount(1), Data(...)
-    const byteCount = writeData.length;
-    pdu = Buffer.alloc(6 + byteCount);
-    pdu.writeUInt8(functionCode, 0);
-    pdu.writeUInt16BE(startAddress, 1);
-    pdu.writeUInt16BE(quantity, 3); // quantity is number of coils
-    pdu.writeUInt8(byteCount, 5);
-    writeData.copy(pdu, 6);
-  } else if (functionCode === 0x10 && writeData) {
-    // Write Multiple Registers
-    // FC(1), StartAddr(2), QuantityRegs(2), ByteCount(1), Data(...)
-    const quantity = writeData.length / 2; // Number of 16-bit registers
-    const byteCount = writeData.length;
-    pdu = Buffer.alloc(6 + byteCount);
     pdu.writeUInt8(functionCode, 0);
     pdu.writeUInt16BE(startAddress, 1);
     pdu.writeUInt16BE(quantity, 3);
+  } else if ((functionCode === 0x0f || functionCode === 0x10) && writeData) {
+    const byteCount = writeData.length;
+    const regCount = functionCode === 0x10 ? writeData.length / 2 : quantity;
+    pdu = Buffer.alloc(6 + byteCount);
+    pdu.writeUInt8(functionCode, 0);
+    pdu.writeUInt16BE(startAddress, 1);
+    pdu.writeUInt16BE(regCount, 3);
     pdu.writeUInt8(byteCount, 5);
     writeData.copy(pdu, 6);
   } else {
-    console.error(
-      `Unsupported Modbus request structure for func: ${functionCode} / data: ${writeData}`,
-    );
-    // Minimal PDU to avoid crash, likely results in Modbus exception
-    pdu = Buffer.from([functionCode]);
+    throw new Error(`Unsupported Modbus function: ${functionCode}`);
   }
 
-  // MBAP Header: TransID(2), ProtoID(2), Len(2), UnitID(1)
   const mbapHeader = Buffer.alloc(7);
-  mbapHeader.writeUInt16BE(Math.floor(Math.random() * 65535), 0); // Transaction ID
-  mbapHeader.writeUInt16BE(0x0000, 2); // Protocol ID
-  mbapHeader.writeUInt16BE(pdu.length + 1, 4); // Length = PDU length + Unit ID byte
-  mbapHeader.writeUInt8(unitId, 6); // Unit ID
+  mbapHeader.writeUInt16BE(Math.floor(Math.random() * 65535), 0);
+  mbapHeader.writeUInt16BE(0x0000, 2);
+  mbapHeader.writeUInt16BE(pdu.length + 1, 4);
+  mbapHeader.writeUInt8(unitId, 6);
 
   return Buffer.concat([mbapHeader, pdu]);
 };
 
 /**
- * Helper function to send a Modbus request and return a Promise resolving with the response Buffer.
- * Includes basic timeout and exception handling.
+ * Improved sendModbusRequest with retry logic
  */
-const sendModbusRequest = (
+// --- Configuration ---
+
+// --- Configuration ---
+
+const SOCKET_REFRESH_INTERVAL = 60000; // Refresh socket every 60 seconds
+const REQUESTS_PER_SOCKET = 50; // Or refresh after X requests
+
+// Track socket usage
+const socketUsage = new Map<
+  string,
+  {
+    socket: any;
+    requestCount: number;
+    lastUsed: number;
+    timer: NodeJS.Timeout;
+  }
+>();
+
+const cleanupSocket = (key: string) => {
+  const entry = socketUsage.get(key);
+  if (entry) {
+    clearTimeout(entry.timer);
+    entry.socket.destroy();
+    socketUsage.delete(key);
+  }
+};
+
+const getSocket = async (ip: string, port: number): Promise<TcpSocket> => {
+  const now = Date.now();
+  const key = `${ip}:${port}`;
+
+  // Clean up old sockets
+  socketUsage.forEach((_, k) => {
+    const entry = socketUsage.get(k)!;
+    if (now - entry.lastUsed > SOCKET_REFRESH_INTERVAL) {
+      cleanupSocket(k);
+    }
+  });
+
+  // Return existing socket if available and fresh
+  if (socketUsage.has(key)) {
+    const entry = socketUsage.get(key)!;
+    if (
+      entry.requestCount < REQUESTS_PER_SOCKET &&
+      now - entry.lastUsed < SOCKET_REFRESH_INTERVAL
+    ) {
+      entry.requestCount++;
+      entry.lastUsed = now;
+      return entry.socket;
+    }
+    cleanupSocket(key);
+  }
+
+  // Create new socket
+  return new Promise((resolve, reject) => {
+    const socket = TcpSocket.createConnection(
+      {host: ip, port, timeout: DEFAULT_TIMEOUT},
+      () => {
+        const timer = setTimeout(
+          () => cleanupSocket(key),
+          SOCKET_REFRESH_INTERVAL,
+        );
+        socketUsage.set(key, {
+          socket,
+          requestCount: 1,
+          lastUsed: now,
+          timer,
+        });
+        resolve(socket);
+      },
+    );
+
+    socket.on('error', err => {
+      cleanupSocket(key);
+      reject(err);
+    });
+
+    socket.on('close', () => {
+      cleanupSocket(key);
+    });
+  });
+};
+
+const sendModbusRequest = async (
   ip: string,
   port: number,
   request: Buffer,
+  timeout: number = DEFAULT_TIMEOUT,
 ): Promise<Buffer> => {
-  return new Promise((resolve, reject) => {
-    const client = TcpSocket.createConnection({host: ip, port}, () => {
-      console.log(
-        `[sendModbusRequest] Raw Request: ${request.toString('hex')}`,
-      );
-      client.write(
-        new Uint8Array(request.buffer, request.byteOffset, request.byteLength),
-      );
-    });
+  let lastError: Error | null = null;
 
-    let responseBuffer = Buffer.alloc(0);
-    let requestTimeout: NodeJS.Timeout | null = null;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const socket = await getSocket(ip, port);
 
-    const cleanup = (error?: Error) => {
-      if (requestTimeout) {
-        clearTimeout(requestTimeout);
-        requestTimeout = null;
-      }
-      if (!client.destroyed) {
-        client.destroy();
-      }
-      if (error) {
-        console.error(`[sendModbusRequest Error] ${error.message || error}`);
-        reject(error); // Reject the promise on error
-      }
-    };
+      return await new Promise<Buffer>((resolve, reject) => {
+        let responseBuffer = Buffer.alloc(0);
+        const timeoutId = setTimeout(() => {
+          cleanup();
+          reject(new Error(`Request timed out after ${timeout}ms`));
+        }, timeout);
 
-    requestTimeout = setTimeout(() => {
-      cleanup(new Error('Modbus request timed out'));
-    }, 5000); // 5 second timeout
+        const cleanup = () => {
+          clearTimeout(timeoutId);
+          socket.removeListener('data', onData);
+          socket.removeListener('error', onError);
+          socket.removeListener('close', onClose);
+        };
 
-    client.on('data', data => {
-      const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-      responseBuffer = Buffer.concat([responseBuffer, dataBuffer]);
-      console.log(
-        `[sendModbusRequest] Raw Response: ${responseBuffer.toString('hex')}`,
-      );
+        const onData = (data: Buffer) => {
+          responseBuffer = Buffer.concat([responseBuffer, data]);
 
-      if (responseBuffer.length >= 6) {
-        // Minimum MBAP header length
-        const expectedLengthMBAP = responseBuffer.readUInt16BE(4);
-        const totalExpectedLength = 6 + expectedLengthMBAP; // Correct total length
+          if (responseBuffer.length >= 6) {
+            const expectedLength = 6 + responseBuffer.readUInt16BE(4);
+            if (responseBuffer.length >= expectedLength) {
+              cleanup();
 
-        if (responseBuffer.length >= totalExpectedLength) {
-          // Check for Modbus Exception Response
-          if (responseBuffer.length >= 8 && responseBuffer[7] & 0x80) {
-            const functionCode = responseBuffer[7] & 0x7f;
-            const exceptionCode = responseBuffer[8];
-            console.error(
-              `[sendModbusRequest] Modbus Exception ${exceptionCode} for function ${functionCode}`,
-            );
-            cleanup(
-              new Error(
-                `Modbus Exception ${exceptionCode} for function ${functionCode}`,
-              ),
-            );
-          } else {
-            // Success!
-            cleanup(); // Clear timeout, close client
-            resolve(responseBuffer); // Resolve the promise with the data
+              if (responseBuffer[7] & 0x80) {
+                reject(
+                  new Error(
+                    `Modbus exception ${responseBuffer[8]} for function ${
+                      responseBuffer[7] & 0x7f
+                    }`,
+                  ),
+                );
+              } else {
+                resolve(responseBuffer);
+              }
+            }
           }
-        }
-        // Else: Wait for more data or timeout
-      }
-    });
+        };
 
-    client.on('error', error => {
-      cleanup(new Error(`Connection error: ${error.message || error}`));
-    });
+        const onError = (err: Error) => {
+          cleanup();
+          reject(new Error(`Connection error: ${err.message}`));
+        };
 
-    client.on('close', () => {
-      if (requestTimeout) {
-        cleanup(new Error('Modbus connection closed unexpectedly'));
+        const onClose = () => {
+          cleanup();
+          reject(new Error('Connection closed before response'));
+        };
+
+        socket.on('data', onData);
+        socket.on('error', onError);
+        socket.on('close', onClose);
+
+        socket.write(request);
+      });
+    } catch (error) {
+      lastError = error as Error;
+      if (attempt < MAX_RETRIES - 1) {
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
-    });
+    }
+  }
+
+  throw lastError || new Error('Modbus request failed');
+};
+
+// Add cleanup function to manually close all sockets when needed
+export const cleanupModbusSockets = () => {
+  socketUsage.forEach((_, key) => {
+    cleanupSocket(key);
   });
 };
 

@@ -1,4 +1,4 @@
-import React, {useState, useEffect} from 'react';
+import React, {useState, useEffect, useCallback, memo} from 'react';
 import {
   View,
   Text,
@@ -21,128 +21,32 @@ import {
 import {useWindowDimensions} from 'react-native';
 import CustomTabBar from '../../components/CustomTabBar';
 import PopupModal from '../../components/PopupModal';
-import {getSectionsWithStatus, updateSection} from '../../utils/db'; // Import database functions
+import {getSectionsWithStatus, updateSection} from '../../utils/db';
 
-const IpAddressScreen = () => {
-  const {width, height} = useWindowDimensions();
-  const isPortrait = height > width;
+interface Section {
+  id: number;
+  name: string;
+  ip: string;
+  cleaningDays: number;
+  working: boolean;
+}
 
-  const [edit, setEdit] = useState(false);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [focusedInput, setFocusedInput] = useState<number | null>(null);
-  const [edited, setEdited] = useState<
-    {
-      working: boolean;
-      cleaningDays: number;
-      id: number;
-      name: string;
-      ip: string;
-    }[]
-  >([]);
-  const [sections, setSections] = useState<
-    {
-      id: number;
-      name: string;
-      ip: string;
-      cleaningDays: number;
-      working: boolean;
-    }[]
-  >([]);
-
-  // Fetch data from the database on component mount
-  useEffect(() => {
-    const fetchData = async () => {
-      getSectionsWithStatus(sections => {
-        const formattedSections = sections.map(section => ({
-          id: section.id!,
-          name: section.name || '', // Ensure 'name' exists or provide a default value
-          ip: section.ip,
-          cleaningDays: section.cleaningDays || 0, // Provide default values if necessary
-          working: section.working || false,
-        }));
-        setSections(formattedSections);
-      });
-    };
-    fetchData();
-  }, []);
-
-  // Handle changes to the section name or IP address
-  const handleFieldChange = (
-    id: number,
-    field: 'name' | 'ip',
-    value: string,
-  ) => {
-    const updatedSections = sections.map(section =>
-      section.id === id ? {...section, [field]: value} : section,
-    );
-    setSections(updatedSections);
-
-    const editedItemIndex = edited.findIndex(item => item.id === id);
-    if (editedItemIndex !== -1) {
-      const updatedEdited = [...edited];
-      updatedEdited[editedItemIndex] = {
-        ...updatedEdited[editedItemIndex],
-        [field]: value,
-      };
-      setEdited(updatedEdited);
-    } else {
-      const editedItem = updatedSections.find(section => section.id === id);
-      if (editedItem) {
-        setEdited([...edited, editedItem]);
-      }
-    }
-  };
-
-  // Handle removing an edit for a specific section
-  const handleRemoveEdit = (id: number) => {
-    const updatedEdited = edited.filter(item => item.id !== id);
-    setEdited(updatedEdited);
-
-    const originalItem = sections.find(section => section.id === id);
-    if (originalItem) {
-      const updatedSections = sections.map(section =>
-        section.id === id ? originalItem : section,
-      );
-      setSections(updatedSections);
-    }
-  };
-
-  // Handle save changes
-  const handleSaveChanges = () => {
-    setModalVisible(true);
-  };
-
-  // Handle confirm changes (update the database)
-  const handleConfirmChanges = async () => {
-    let success = true;
-    for (const item of edited) {
-      console.log(item.ip !== '');
-
-      await updateSection(
-        item.id,
-        item.name,
-        item.ip,
-        item.cleaningDays,
-        item.working,
-        () => {},
-      );
-    }
-
-    if (success) {
-      Alert.alert('Success', 'Changes saved successfully.');
-      setEdited([]);
-      setEdit(false);
-      setModalVisible(false);
-    } else {
-      Alert.alert('Error', 'Failed to save changes.');
-    }
-  };
-
-  // Render item for the grid
-  const renderGridItem = ({
+// Memoized Grid Item Component
+const GridItem = memo(
+  ({
     item,
+    isEdit,
+    isFocused,
+    onFieldChange,
+    onFocus,
+    onBlur,
   }: {
-    item: {id: number; name: string; ip: string};
+    item: Section;
+    isEdit: boolean;
+    isFocused: boolean;
+    onFieldChange: (field: 'name' | 'ip', value: string) => void;
+    onFocus: () => void;
+    onBlur: () => void;
   }) => (
     <View style={styles.gridItem}>
       <View style={styles.card}>
@@ -152,25 +56,168 @@ const IpAddressScreen = () => {
               style={styles.titleInput}
               placeholder="Enter section name"
               value={item.name}
-              editable={edit}
-              onChangeText={value => handleFieldChange(item.id, 'name', value)}
+              editable={isEdit}
+              onChangeText={value => onFieldChange('name', value)}
             />
           </View>
           <TextInput
-            style={[
-              styles.ipInput,
-              focusedInput === item.id && styles.focusedInput,
-            ]}
-            onFocus={() => setFocusedInput(item.id)}
-            onBlur={() => setFocusedInput(null)}
+            style={[styles.ipInput, isFocused && styles.focusedInput]}
+            onFocus={onFocus}
+            onBlur={onBlur}
             value={item.ip}
-            editable={edit}
+            editable={isEdit}
             placeholder="Enter IP address"
-            onChangeText={value => handleFieldChange(item.id, 'ip', value)}
+            onChangeText={value => onFieldChange('ip', value)}
           />
         </View>
       </View>
     </View>
+  ),
+);
+
+// Memoized Modal Item
+const ModalItem = memo(
+  ({item, onRemove}: {item: Section; onRemove: () => void}) => (
+    <View style={styles.modalItem}>
+      <View style={styles.modalItemHeader}>
+        <View style={styles.iconWrapper}>
+          <IPAdressIcon fill={'black'} style={styles.icon} />
+        </View>
+        <Text style={styles.modalItemTitle}>{item.name}</Text>
+      </View>
+      <View style={styles.modalItemContent}>
+        <Text style={styles.modalItemText}>{item.ip}</Text>
+        <TouchableOpacity style={styles.cancelIconWrapper} onPress={onRemove}>
+          <CancelIcon />
+        </TouchableOpacity>
+      </View>
+    </View>
+  ),
+);
+
+const IpAddressScreen = () => {
+  const {width, height} = useWindowDimensions();
+  const isPortrait = height > width;
+
+  const [edit, setEdit] = useState(false);
+  const [modalVisible, setModalVisible] = useState(false);
+  const [focusedInputId, setFocusedInputId] = useState<number | null>(null);
+  const [editedSections, setEditedSections] = useState<Section[]>([]);
+  const [sections, setSections] = useState<Section[]>([]);
+
+  // Fetch data from the database
+  useEffect(() => {
+    const fetchData = () => {
+      getSectionsWithStatus(sections => {
+        const formattedSections = sections.map(section => ({
+          id: section.id!,
+          name: section.name || '',
+          ip: section.ip,
+          cleaningDays: section.cleaningDays || 0,
+          working: section.working || false,
+        }));
+        setSections(formattedSections);
+      });
+    };
+    fetchData();
+  }, []);
+
+  // Handle field changes with useCallback
+  const handleFieldChange = useCallback(
+    (id: number, field: 'name' | 'ip', value: string) => {
+      setSections(prev =>
+        prev.map(section =>
+          section.id === id ? {...section, [field]: value} : section,
+        ),
+      );
+
+      setEditedSections(prev => {
+        const existingIndex = prev.findIndex(item => item.id === id);
+        if (existingIndex !== -1) {
+          const updated = [...prev];
+          updated[existingIndex] = {...updated[existingIndex], [field]: value};
+          return updated;
+        } else {
+          const section = sections.find(s => s.id === id);
+          if (section) {
+            return [...prev, {...section, [field]: value}];
+          }
+          return prev;
+        }
+      });
+    },
+    [sections],
+  );
+
+  // Handle remove edit with useCallback
+  const handleRemoveEdit = useCallback(
+    (id: number) => {
+      setEditedSections(prev => prev.filter(item => item.id !== id));
+
+      // Revert to original value
+      const originalSection = sections.find(s => s.id === id);
+      if (originalSection) {
+        setSections(prev =>
+          prev.map(section => (section.id === id ? originalSection : section)),
+        );
+      }
+    },
+    [sections],
+  );
+
+  // Handle save changes with useCallback
+  const handleSaveChanges = useCallback(() => {
+    setModalVisible(true);
+  }, []);
+
+  // Handle confirm changes with useCallback
+  const handleConfirmChanges = useCallback(async () => {
+    try {
+      const updatePromises = editedSections.map(item =>
+        updateSection(
+          item.id,
+          item.name,
+          item.ip,
+          item.cleaningDays,
+          item.working,
+          () => {},
+        ),
+      );
+
+      await Promise.all(updatePromises);
+      Alert.alert('Success', 'Changes saved successfully.');
+      setEditedSections([]);
+      setEdit(false);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to save changes.');
+    } finally {
+      setModalVisible(false);
+    }
+  }, [editedSections]);
+
+  // Render function for grid items with useCallback
+  const renderGridItem = useCallback(
+    ({item}: {item: Section}) => (
+      <GridItem
+        item={item}
+        isEdit={edit}
+        isFocused={focusedInputId === item.id}
+        onFieldChange={(field, value) =>
+          handleFieldChange(item.id, field, value)
+        }
+        onFocus={() => setFocusedInputId(item.id)}
+        onBlur={() => setFocusedInputId(null)}
+      />
+    ),
+    [edit, focusedInputId, handleFieldChange],
+  );
+
+  // Render function for modal items with useCallback
+  const renderModalItem = useCallback(
+    ({item}: {item: Section}) => (
+      <ModalItem item={item} onRemove={() => handleRemoveEdit(item.id)} />
+    ),
+    [handleRemoveEdit],
   );
 
   return (
@@ -186,35 +233,23 @@ const IpAddressScreen = () => {
           Are you sure you want to do this action? This can't be undone.
         </Text>
         <FlatList
-          data={edited}
+          data={editedSections}
           contentContainerStyle={styles.modalContentContainer}
-          renderItem={({item}) => (
-            <View style={styles.modalItem}>
-              <View style={styles.modalItemHeader}>
-                <View style={styles.iconWrapper}>
-                  <IPAdressIcon fill={'black'} style={styles.icon} />
-                </View>
-                <Text style={styles.modalItemTitle}>{item.name}</Text>
-              </View>
-              <View style={styles.modalItemContent}>
-                <Text style={styles.modalItemText}>{item.ip}</Text>
-                <TouchableOpacity
-                  style={styles.cancelIconWrapper}
-                  onPress={() => handleRemoveEdit(item.id)}>
-                  <CancelIcon />
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
+          renderItem={renderModalItem}
           keyExtractor={item => item.id.toString()}
           columnWrapperStyle={isPortrait ? null : styles.modalColumnWrapper}
           numColumns={isPortrait ? 1 : 3}
+          initialNumToRender={5}
+          maxToRenderPerBatch={5}
+          windowSize={5}
         />
       </PopupModal>
+
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Settings</Text>
         <CustomTabBar />
       </View>
+
       <View style={styles.container}>
         <View style={styles.gridContainer}>
           <FlatList
@@ -230,9 +265,14 @@ const IpAddressScreen = () => {
             }
             contentContainerStyle={styles.gridContentContainer}
             showsVerticalScrollIndicator={false}
+            initialNumToRender={8}
+            maxToRenderPerBatch={8}
+            windowSize={5}
+            extraData={{edit, focusedInputId}}
           />
         </View>
       </View>
+
       <View style={styles.footer}>
         {edit ? (
           <>
@@ -240,14 +280,15 @@ const IpAddressScreen = () => {
               style={styles.cancelButton}
               onPress={() => {
                 setEdit(false);
-                setEdited([]);
+                setEditedSections([]);
               }}>
               <CloseIcon fill={COLORS.good[600]} width={30} height={30} />
               <Text style={styles.buttonText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.saveButton}
-              onPress={handleSaveChanges}>
+              onPress={handleSaveChanges}
+              disabled={editedSections.length === 0}>
               <CheckIcon2 fill={COLORS.good[600]} width={30} height={30} />
               <Text style={styles.buttonText}>Save changes</Text>
             </TouchableOpacity>

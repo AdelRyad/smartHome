@@ -6,123 +6,124 @@ interface WorkingHoursState {
   workingHours: Record<
     number,
     Record<number, {currentHours: number | null; maxHours: number | null}>
-  >; // Section ID -> Lamp ID -> { currentHours, maxHours }
-  setWorkingHours: (
-    sectionId: number,
-    lampId: number,
-    currentHours: number | null,
-    maxHours: number | null,
-  ) => void;
-  resetWorkingHours: (sectionId?: number) => void;
-  startFetching: (
+  >;
+  isLoading: boolean;
+  error: string | null;
+  fetchWorkingHours: (sectionId: number, ip: string) => Promise<void>;
+  startPolling: (
     sectionId: number,
     ip: string,
-    interval: number,
+    interval?: number,
   ) => () => void;
 }
 
-const useWorkingHoursStore = create<WorkingHoursState>(set => {
+const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
+  let pollingIntervals: Record<number, NodeJS.Timeout> = {};
+
   const fetchWorkingHours = async (sectionId: number, ip: string) => {
+    if (!ip) {
+      set({error: 'No IP address provided'});
+      return;
+    }
+
+    set({isLoading: true, error: null});
+
     try {
       const updatedWorkingHours: Record<
         number,
         {currentHours: number | null; maxHours: number | null}
       > = {};
 
-      // Fetch max hours once for the section
-      let maxHours: number | null = null;
-      try {
-        maxHours = await readLifeHoursSetpoint(ip, 502);
-      } catch (error) {
-        console.error(
-          `Error fetching max hours for Section ${sectionId}:`,
-          error,
-        );
-      }
+      // Fetch max hours for the section
+      const maxHours = await readLifeHoursSetpoint(ip, 502).catch(() => null);
 
-      for (let lampId = 1; lampId <= 4; lampId++) {
+      // Fetch hours for each lamp in parallel
+      const lampPromises = [1, 2, 3, 4].map(async lampId => {
         try {
-          const workingHours = await readLampHours(ip, 502, lampId);
-          updatedWorkingHours[lampId] = {
-            currentHours: workingHours.currentHours,
-            maxHours: maxHours, // Use the fetched max hours
+          const result = await readLampHours(ip, 502, lampId);
+          return {
+            lampId,
+            data: {currentHours: result.currentHours, maxHours},
           };
         } catch (error) {
-          console.error(
-            `Error fetching working hours for Lamp ${lampId}:`,
-            error,
-          );
-          updatedWorkingHours[lampId] = {
-            currentHours: null,
-            maxHours: maxHours,
+          return {
+            lampId,
+            data: {currentHours: null, maxHours},
           };
         }
-      }
+      });
+
+      const lampResults = await Promise.all(lampPromises);
+      lampResults.forEach(({lampId, data}) => {
+        updatedWorkingHours[lampId] = data;
+      });
 
       set(state => ({
         workingHours: {
           ...state.workingHours,
           [sectionId]: updatedWorkingHours,
         },
+        isLoading: false,
       }));
     } catch (error) {
-      console.error(
-        `Error fetching working hours for Section ${sectionId}:`,
-        error,
-      );
+      set({
+        error: `Failed to fetch working hours: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        isLoading: false,
+      });
     }
   };
 
-  const fetchAllSectionsData = async () => {
+  const startPolling = (sectionId: number, ip: string, interval = 10000) => {
+    // Clear existing interval if any
+    if (pollingIntervals[sectionId]) {
+      clearInterval(pollingIntervals[sectionId]);
+    }
+
+    // Initial fetch
+    fetchWorkingHours(sectionId, ip);
+
+    // Set up polling
+    pollingIntervals[sectionId] = setInterval(
+      () => fetchWorkingHours(sectionId, ip),
+      interval,
+    );
+
+    // Return cleanup function
+    return () => {
+      if (pollingIntervals[sectionId]) {
+        clearInterval(pollingIntervals[sectionId]);
+        delete pollingIntervals[sectionId];
+      }
+    };
+  };
+
+  // Initial data fetch
+  const initialize = async () => {
     try {
       const sections = await new Promise<any[]>(resolve => {
         getSectionsWithStatus(resolve);
       });
-      for (const section of sections) {
+
+      sections.forEach(section => {
         if (section.ip) {
-          // Fetch working hours
-          fetchWorkingHours(section.id, section.ip);
+          startPolling(section.id, section.ip, 15000);
         }
-      }
+      });
     } catch (error) {
-      console.error('Error fetching all sections data:', error);
+      console.error('Error initializing sections:', error);
     }
   };
 
-  const startFetching = (sectionId: number, ip: string, interval: number) => {
-    fetchWorkingHours(sectionId, ip); // Initial fetch
-    const intervalId = setInterval(
-      () => fetchWorkingHours(sectionId, ip),
-      interval,
-    );
-    return () => clearInterval(intervalId); // Return cleanup function
-  };
-
-  fetchAllSectionsData();
-  setInterval(fetchAllSectionsData, 5 * 1000); // 1 minute
+  initialize();
 
   return {
     workingHours: {},
-    setWorkingHours: (sectionId, lampId, currentHours, maxHours) =>
-      set(state => ({
-        workingHours: {
-          ...state.workingHours,
-          [sectionId]: {
-            ...state.workingHours[sectionId],
-            [lampId]: {currentHours, maxHours},
-          },
-        },
-      })),
-    resetWorkingHours: sectionId =>
-      set(state => {
-        if (sectionId !== undefined) {
-          const updatedSections = {...state.workingHours};
-          delete updatedSections[sectionId];
-          return {workingHours: updatedSections};
-        }
-        return {workingHours: {}};
-      }),
-    startFetching,
+    isLoading: false,
+    error: null,
+    fetchWorkingHours,
+    startPolling,
   };
 });
 

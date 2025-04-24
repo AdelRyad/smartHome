@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useState, useCallback, memo} from 'react';
 import {
   View,
   Text,
@@ -26,25 +26,94 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import PopupModal from '../../components/PopupModal';
 import {getContactInfo, updateContactInfo} from '../../utils/db';
 
-// Define the structure for a contact field
 interface ContactField {
-  key: keyof ContactInfoState; // Use keys from the state type
+  key: keyof ContactInfoState;
   title: string;
-  icon: React.FC<any>; // Type for icon component
-  type?: 'text' | 'date' | 'phone' | 'email'; // Input type hint
+  icon: React.FC<any>;
+  type?: 'text' | 'date' | 'phone' | 'email';
 }
 
-// Define the state type for contact information
 interface ContactInfoState {
   name: string;
   email: string;
   phone: string;
   project_refrence: string;
   hood_refrence: string;
-  commission_date: string; // Keep as string from DB
+  commission_date: string;
 }
 
-// Define the fields based on the state structure
+// Memoized Contact Field Item
+const ContactFieldItem = memo(
+  ({
+    item,
+    value,
+    isEdit,
+    onChange,
+    onDatePress,
+  }: {
+    item: ContactField;
+    value: string;
+    isEdit: boolean;
+    onChange: (value: string) => void;
+    onDatePress: () => void;
+  }) => {
+    const formattedValue =
+      item.type === 'date'
+        ? new Date(value || Date.now()).toLocaleDateString()
+        : value;
+
+    return (
+      <View style={styles.gridItem}>
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <View style={styles.iconWrapper}>
+              <item.icon fill={'black'} style={styles.icon} />
+            </View>
+            <Text style={styles.cardTitle}>{item.title}</Text>
+          </View>
+          {item.type === 'date' ? (
+            <TouchableOpacity
+              style={styles.dateInput}
+              onPress={onDatePress}
+              disabled={!isEdit}>
+              <Text style={styles.dateText}>{formattedValue}</Text>
+            </TouchableOpacity>
+          ) : (
+            <TextInput
+              style={styles.input}
+              placeholder={`Enter ${item.title}`}
+              value={value}
+              editable={isEdit}
+              onChangeText={onChange}
+              keyboardType={
+                item.type === 'phone'
+                  ? 'phone-pad'
+                  : item.type === 'email'
+                  ? 'email-address'
+                  : 'default'
+              }
+              autoCapitalize={item.type === 'email' ? 'none' : 'sentences'}
+            />
+          )}
+        </View>
+      </View>
+    );
+  },
+);
+
+// Memoized Modal Content
+const ModalContent = memo(() => (
+  <View style={styles.modalContent}>
+    <View style={styles.modalIconWrapper}>
+      <CustomerServiceIcon fill={'black'} style={styles.modalIcon} />
+    </View>
+    <Text style={styles.modalTitle}>Update contact information</Text>
+    <Text style={styles.modalSubText}>
+      Are you sure you want to do this action? This can't be undone.
+    </Text>
+  </View>
+));
+
 const contactFields: ContactField[] = [
   {
     key: 'project_refrence',
@@ -72,126 +141,63 @@ const ContactScreen = () => {
   const {width, height} = useWindowDimensions();
   const isPortrait = height > width;
 
-  const [datePickerValue, setDatePickerValue] = useState(new Date()); // Separate state for date picker UI
+  const [datePickerValue, setDatePickerValue] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [edit, setEdit] = useState(false);
-
-  // State for the actual contact info from DB
   const [contactInfo, setContactInfo] = useState<ContactInfoState>({
     name: '',
     email: '',
     phone: '',
     project_refrence: '',
     hood_refrence: '',
-    commission_date: new Date().toISOString(), // Initialize with ISO string
+    commission_date: new Date().toISOString(),
   });
-
-  // State for edited values, initialized with contactInfo
   const [editedContactInfo, setEditedContactInfo] =
     useState<ContactInfoState>(contactInfo);
 
   // Fetch initial data
   useEffect(() => {
     getContactInfo(fetchedContact => {
-      console.log('Fetched contact info:', fetchedContact);
-
       const initialData = {
         name: fetchedContact.name || '',
         email: fetchedContact.email || '',
         phone: fetchedContact.phone || '',
         project_refrence: fetchedContact.project_refrence || '',
         hood_refrence: fetchedContact.hood_refrence || '',
-        // Ensure commission_date is a valid date string or default
         commission_date:
           fetchedContact.commission_date || new Date().toISOString(),
       };
       setContactInfo(initialData);
-      setEditedContactInfo(initialData); // Initialize edits with fetched data
+      setEditedContactInfo(initialData);
       try {
-        // Also set the date picker initial value correctly
         setDatePickerValue(new Date(initialData.commission_date));
-      } catch (e) {
-        console.error('Error parsing commission date for picker:', e);
-        setDatePickerValue(new Date()); // Default if parsing fails
+      } catch {
+        setDatePickerValue(new Date());
       }
     });
   }, []);
 
-  // Handle changes to any input field
-  const handleInputChange = (key: keyof ContactInfoState, value: string) => {
-    setEditedContactInfo(prev => ({...prev, [key]: value}));
-  };
+  // Stable callback for input changes
+  const handleInputChange = useCallback(
+    (key: keyof ContactInfoState, value: string) => {
+      setEditedContactInfo(prev => ({...prev, [key]: value}));
+    },
+    [],
+  );
 
-  // Render item based on the field definition
-  const renderGridItem = ({item}: {item: ContactField}) => {
-    const displayValue = edit
-      ? editedContactInfo[item.key]
-      : contactInfo[item.key];
+  // Stable callback for date picker
+  const handleDatePress = useCallback(() => {
+    try {
+      setDatePickerValue(new Date(editedContactInfo.commission_date));
+    } catch {
+      setDatePickerValue(new Date());
+    }
+    setShowDatePicker(true);
+  }, [editedContactInfo.commission_date]);
 
-    // Format date for display
-    const formattedDisplayValue =
-      item.type === 'date'
-        ? new Date(displayValue || Date.now()).toLocaleDateString() // Use locale string, handle potential invalid date
-        : displayValue;
-
-    return (
-      <View style={[styles.gridItem, {maxWidth: isPortrait ? '100%' : '49%'}]}>
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <View style={styles.iconWrapper}>
-              <item.icon fill={'black'} style={styles.icon} />
-            </View>
-            <Text style={styles.cardTitle}>{item.title}</Text>
-          </View>
-          {item.type === 'date' ? (
-            <TouchableOpacity
-              style={styles.dateInput}
-              onPress={() => {
-                if (edit) {
-                  // Try parsing current edited date for picker, default if invalid
-                  try {
-                    setDatePickerValue(new Date(editedContactInfo[item.key]));
-                  } catch {
-                    setDatePickerValue(new Date());
-                  }
-                  setShowDatePicker(true);
-                }
-              }}
-              disabled={!edit} // Disable if not editing
-            >
-              <Text style={styles.dateText}>{formattedDisplayValue}</Text>
-            </TouchableOpacity>
-          ) : (
-            <TextInput
-              style={styles.input}
-              placeholder={`Enter ${item.title}`}
-              value={displayValue}
-              editable={edit}
-              onChangeText={value => handleInputChange(item.key, value)}
-              keyboardType={
-                item.type === 'phone'
-                  ? 'phone-pad'
-                  : item.type === 'email'
-                  ? 'email-address'
-                  : 'default'
-              }
-              autoCapitalize={item.type === 'email' ? 'none' : 'sentences'}
-            />
-          )}
-        </View>
-      </View>
-    );
-  };
-
-  // Show confirmation modal
-  const handleSaveChanges = () => {
-    setModalVisible(true);
-  };
-
-  // Handle confirm changes (send edit request)
-  const handleConfirmChanges = () => {
-    // Construct the object expected by updateContactInfo, including the original name
+  // Stable callback for saving changes
+  const handleConfirmChanges = useCallback(() => {
     const dataToSave = {
       name: editedContactInfo.name,
       email: editedContactInfo.email,
@@ -201,27 +207,28 @@ const ContactScreen = () => {
       commission_date: editedContactInfo.commission_date,
     };
 
-    // Call update function with the reconstructed data
     updateContactInfo(dataToSave, (success: boolean) => {
       if (success) {
-        setContactInfo({
-          name: dataToSave.name,
-          email: dataToSave.email,
-          phone: dataToSave.phone,
-          project_refrence: dataToSave.project_refrence,
-          hood_refrence: dataToSave.hood_refrence,
-          commission_date: dataToSave.commission_date,
-        });
-
+        setContactInfo(dataToSave);
         setEdit(false);
-        console.log('Contact Info Updated Successfully');
-      } else {
-        console.error('Failed to update contact info');
-        // Optionally show an error message to the user
       }
-      setModalVisible(false); // Close modal regardless of success/fail
+      setModalVisible(false);
     });
-  };
+  }, [editedContactInfo]);
+
+  // Optimized render function for FlatList
+  const renderGridItem = useCallback(
+    ({item}: {item: ContactField}) => (
+      <ContactFieldItem
+        item={item}
+        value={edit ? editedContactInfo[item.key] : contactInfo[item.key]}
+        isEdit={edit}
+        onChange={value => handleInputChange(item.key, value)}
+        onDatePress={handleDatePress}
+      />
+    ),
+    [edit, editedContactInfo, contactInfo, handleInputChange, handleDatePress],
+  );
 
   return (
     <Layout>
@@ -231,18 +238,9 @@ const ContactScreen = () => {
         onClose={() => setModalVisible(false)}
         title="Confirmation needed"
         Icon={CheckIcon}>
-        <View style={styles.modalContent}>
-          <View style={styles.modalIconWrapper}>
-            <CustomerServiceIcon fill={'black'} style={styles.modalIcon} />
-          </View>
-          <Text style={styles.modalTitle}>Update contact information</Text>
-          <Text style={styles.modalSubText}>
-            Are you sure you want to do this action? This can't be undone.
-          </Text>
-        </View>
+        <ModalContent />
       </PopupModal>
 
-      {/* Date Picker Modal */}
       {showDatePicker && (
         <DateTimePicker
           testID="dateTimePicker"
@@ -251,9 +249,8 @@ const ContactScreen = () => {
           is24Hour={true}
           display="default"
           onChange={(event, selectedDate) => {
-            setShowDatePicker(false); // Hide picker immediately
+            setShowDatePicker(false);
             if (event.type === 'set' && selectedDate) {
-              // Update the edited state with the new date's ISO string
               handleInputChange('commission_date', selectedDate.toISOString());
             }
           }}
@@ -264,50 +261,50 @@ const ContactScreen = () => {
         <Text style={styles.headerTitle}>Settings</Text>
         <CustomTabBar />
       </View>
+
       <View style={styles.container}>
         <View style={styles.gridContainer}>
           <FlatList
             key={isPortrait ? 'portrait' : 'landscape'}
             numColumns={isPortrait ? 1 : 2}
-            data={contactFields} // Use contactFields as data source
+            data={contactFields}
             renderItem={renderGridItem}
-            keyExtractor={item => item.key} // Use field key as extractor
+            keyExtractor={item => item.key}
             columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
             contentContainerStyle={styles.gridContentContainer}
             showsVerticalScrollIndicator={false}
-            extraData={edit ? editedContactInfo : contactInfo} // Re-render when edit state or relevant data changes
+            initialNumToRender={5}
+            maxToRenderPerBatch={5}
+            windowSize={5}
+            extraData={{edit, editedContactInfo, contactInfo}}
           />
         </View>
       </View>
+
       <View style={styles.footer}>
         {edit ? (
           <>
-            {/* Cancel Button */}
             <TouchableOpacity
               style={styles.cancelButton}
               onPress={() => {
                 setEdit(false);
-                // Reset edited state back to original on cancel
                 setEditedContactInfo(contactInfo);
               }}>
               <CloseIcon fill={COLORS.gray[600]} width={30} height={30} />
               <Text style={styles.buttonText}>Cancel</Text>
             </TouchableOpacity>
 
-            {/* Save Button */}
             <TouchableOpacity
               style={styles.saveButton}
-              onPress={handleSaveChanges}>
+              onPress={() => setModalVisible(true)}>
               <CheckIcon2 fill={COLORS.good[600]} width={30} height={30} />
               <Text style={styles.buttonText}>Save changes</Text>
             </TouchableOpacity>
           </>
         ) : (
-          /* Edit Button */
           <TouchableOpacity
             style={styles.editButton}
             onPress={() => {
-              // Ensure edits start from current saved state
               setEditedContactInfo(contactInfo);
               setEdit(true);
             }}>
