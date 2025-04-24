@@ -1,224 +1,406 @@
 import TcpSocket from 'react-native-tcp-socket';
-import {Buffer} from 'buffer';
+import {Buffer} from 'buffer'; // Make sure to import Buffer
+
+// --- Define Shared Types ---
+interface LampHours {
+  currentHours: number;
+}
 
 // --- Configuration ---
 const MODBUS_UNIT_ID = 1;
-const DEFAULT_TIMEOUT = 3000; // 3 seconds timeout
-const MAX_RETRIES = 2; // Maximum retry attempts
 
-// --- Helper Functions ---
+// --- Helper Functions (Updated for FC16 Write Multiple Registers) ---
 
 /**
- * Creates a Modbus TCP request buffer
+ * Creates a Modbus TCP request buffer (MBAP Header + PDU).
+ * Addresses passed to this function should be 0-based.
  */
 const createModbusRequest = (
-  unitId: number,
-  functionCode: number,
-  startAddress: number,
-  quantity: number,
-  writeData?: Buffer,
+  unitId: number, // Modbus unit ID
+  functionCode: number, // Modbus function code
+  startAddress: number, // Register address (0-based)
+  quantity: number, // Number of items (coils/registers) OR the value for single writes (FC5, FC6)
+  writeData?: Buffer, // Data buffer for multiple write operations (FC15, FC16)
 ): Buffer => {
   let pdu: Buffer;
 
-  if ([0x01, 0x02, 0x03, 0x04].includes(functionCode)) {
+  if (
+    functionCode === 0x01 ||
+    functionCode === 0x02 ||
+    functionCode === 0x03 ||
+    functionCode === 0x04
+  ) {
+    // Read Coils/Inputs/Registers: FC(1), StartAddr(2), Quantity(2)
     pdu = Buffer.alloc(5);
     pdu.writeUInt8(functionCode, 0);
     pdu.writeUInt16BE(startAddress, 1);
     pdu.writeUInt16BE(quantity, 3);
-  } else if (functionCode === 0x05 || functionCode === 0x06) {
+  } else if (functionCode === 0x05) {
+    // Write Single Coil
+    // FC(1), Addr(2), Value(2 - 0xFF00/0x0000)
     pdu = Buffer.alloc(5);
     pdu.writeUInt8(functionCode, 0);
     pdu.writeUInt16BE(startAddress, 1);
-    pdu.writeUInt16BE(quantity, 3);
-  } else if ((functionCode === 0x0f || functionCode === 0x10) && writeData) {
+    pdu.writeUInt16BE(quantity, 3); // quantity holds the value
+  } else if (functionCode === 0x06) {
+    // Write Single Register
+    // FC(1), Addr(2), Value(2)
+    pdu = Buffer.alloc(5);
+    pdu.writeUInt8(functionCode, 0);
+    pdu.writeUInt16BE(startAddress, 1);
+    pdu.writeUInt16BE(quantity, 3); // quantity holds the value
+  } else if (functionCode === 0x0f && writeData) {
+    // Write Multiple Coils
+    // FC(1), StartAddr(2), QuantityCoils(2), ByteCount(1), Data(...)
     const byteCount = writeData.length;
-    const regCount = functionCode === 0x10 ? writeData.length / 2 : quantity;
     pdu = Buffer.alloc(6 + byteCount);
     pdu.writeUInt8(functionCode, 0);
     pdu.writeUInt16BE(startAddress, 1);
-    pdu.writeUInt16BE(regCount, 3);
+    pdu.writeUInt16BE(quantity, 3); // quantity is number of coils
+    pdu.writeUInt8(byteCount, 5);
+    writeData.copy(pdu, 6);
+  } else if (functionCode === 0x10 && writeData) {
+    // Write Multiple Registers
+    // FC(1), StartAddr(2), QuantityRegs(2), ByteCount(1), Data(...)
+    const quantity = writeData.length / 2; // Number of 16-bit registers
+    const byteCount = writeData.length;
+    pdu = Buffer.alloc(6 + byteCount);
+    pdu.writeUInt8(functionCode, 0);
+    pdu.writeUInt16BE(startAddress, 1);
+    pdu.writeUInt16BE(quantity, 3);
     pdu.writeUInt8(byteCount, 5);
     writeData.copy(pdu, 6);
   } else {
-    throw new Error(`Unsupported Modbus function: ${functionCode}`);
+    console.error(
+      `Unsupported Modbus request structure for func: ${functionCode} / data: ${writeData}`,
+    );
+    // Minimal PDU to avoid crash, likely results in Modbus exception
+    pdu = Buffer.from([functionCode]);
   }
 
+  // MBAP Header: TransID(2), ProtoID(2), Len(2), UnitID(1)
   const mbapHeader = Buffer.alloc(7);
-  mbapHeader.writeUInt16BE(Math.floor(Math.random() * 65535), 0);
-  mbapHeader.writeUInt16BE(0x0000, 2);
-  mbapHeader.writeUInt16BE(pdu.length + 1, 4);
-  mbapHeader.writeUInt8(unitId, 6);
+  mbapHeader.writeUInt16BE(Math.floor(Math.random() * 65535), 0); // Transaction ID
+  mbapHeader.writeUInt16BE(0x0000, 2); // Protocol ID
+  mbapHeader.writeUInt16BE(pdu.length + 1, 4); // Length = PDU length + Unit ID byte
+  mbapHeader.writeUInt8(unitId, 6); // Unit ID
 
   return Buffer.concat([mbapHeader, pdu]);
 };
 
 /**
- * Improved sendModbusRequest with retry logic
+ * Helper function to send a Modbus request and return a Promise resolving with the response Buffer.
+ * Includes basic timeout and exception handling.
  */
-// --- Configuration ---
 
-// --- Configuration ---
+// Simple event emitter implementation for React Native
+class SimpleEventEmitter {
+  private events: Record<string, Array<(...args: any[]) => void>> = {};
 
-const SOCKET_REFRESH_INTERVAL = 60000; // Refresh socket every 60 seconds
-const REQUESTS_PER_SOCKET = 50; // Or refresh after X requests
-
-// Track socket usage
-const socketUsage = new Map<
-  string,
-  {
-    socket: any;
-    requestCount: number;
-    lastUsed: number;
-    timer: NodeJS.Timeout;
-  }
->();
-
-const cleanupSocket = (key: string) => {
-  const entry = socketUsage.get(key);
-  if (entry) {
-    clearTimeout(entry.timer);
-    entry.socket.destroy();
-    socketUsage.delete(key);
-  }
-};
-
-const getSocket = async (ip: string, port: number): Promise<TcpSocket> => {
-  const now = Date.now();
-  const key = `${ip}:${port}`;
-
-  // Clean up old sockets
-  socketUsage.forEach((_, k) => {
-    const entry = socketUsage.get(k)!;
-    if (now - entry.lastUsed > SOCKET_REFRESH_INTERVAL) {
-      cleanupSocket(k);
+  on(event: string, callback: (...args: any[]) => void): void {
+    if (!this.events[event]) {
+      this.events[event] = [];
     }
-  });
-
-  // Return existing socket if available and fresh
-  if (socketUsage.has(key)) {
-    const entry = socketUsage.get(key)!;
-    if (
-      entry.requestCount < REQUESTS_PER_SOCKET &&
-      now - entry.lastUsed < SOCKET_REFRESH_INTERVAL
-    ) {
-      entry.requestCount++;
-      entry.lastUsed = now;
-      return entry.socket;
-    }
-    cleanupSocket(key);
+    this.events[event].push(callback);
   }
 
-  // Create new socket
-  return new Promise((resolve, reject) => {
-    const socket = TcpSocket.createConnection(
-      {host: ip, port, timeout: DEFAULT_TIMEOUT},
-      () => {
-        const timer = setTimeout(
-          () => cleanupSocket(key),
-          SOCKET_REFRESH_INTERVAL,
+  off(event: string, callback: (...args: any[]) => void): void {
+    if (!this.events[event]) return;
+    this.events[event] = this.events[event].filter(cb => cb !== callback);
+  }
+
+  emit(event: string, ...args: any[]): void {
+    if (!this.events[event]) return;
+    this.events[event].forEach(callback => {
+      try {
+        callback(...args);
+      } catch (error) {
+        console.error(`Error in event handler for ${event}:`, error);
+      }
+    });
+  }
+}
+
+// Connection pool to manage and refresh connections
+class TcpConnectionManager {
+  private static instance: TcpConnectionManager;
+  private connections: Map<string, any> = new Map();
+  private refreshTimers: Map<string, NodeJS.Timeout> = new Map();
+  private connectionEvents: SimpleEventEmitter = new SimpleEventEmitter();
+  private readonly REFRESH_INTERVAL = 2 * 60 * 1000; // 2 minutes in milliseconds
+
+  // Singleton pattern
+  public static getInstance(): TcpConnectionManager {
+    if (!TcpConnectionManager.instance) {
+      TcpConnectionManager.instance = new TcpConnectionManager();
+    }
+    return TcpConnectionManager.instance;
+  }
+
+  /**
+   * Get or create a connection to the specified host and port
+   */
+  public getConnection(host: string, port: number): Promise<any> {
+    const connectionKey = `${host}:${port}`;
+
+    return new Promise((resolve, reject) => {
+      // If we already have an active connection, return it
+      if (this.connections.has(connectionKey)) {
+        const connection = this.connections.get(connectionKey);
+        if (!connection.destroyed) {
+          resolve(connection);
+          return;
+        }
+      }
+
+      // Create a new connection
+      this.createConnection(host, port)
+        .then(connection => {
+          resolve(connection);
+        })
+        .catch(reject);
+    });
+  }
+
+  /**
+   * Creates a new TCP connection and sets up refresh timer
+   */
+  private createConnection(host: string, port: number): Promise<any> {
+    const connectionKey = `${host}:${port}`;
+
+    // Clear any existing connection and timer
+    this.closeConnection(connectionKey);
+
+    return new Promise((resolve, reject) => {
+      console.log(
+        `[TcpConnectionManager] Creating new connection to ${connectionKey}`,
+      );
+
+      const client = TcpSocket.createConnection({host, port}, () => {
+        console.log(`[TcpConnectionManager] Connected to ${connectionKey}`);
+
+        // Store the connection
+        this.connections.set(connectionKey, client);
+
+        // Set up the refresh timer
+        const timer = setTimeout(() => {
+          console.log(
+            `[TcpConnectionManager] Refreshing connection to ${connectionKey}`,
+          );
+          this.refreshConnection(host, port);
+        }, this.REFRESH_INTERVAL);
+
+        this.refreshTimers.set(connectionKey, timer);
+
+        // Resolve with the new connection
+        resolve(client);
+      });
+
+      // Handle connection errors
+      client.on('error', error => {
+        console.error(
+          `[TcpConnectionManager] Connection error for ${connectionKey}:`,
+          error,
         );
-        socketUsage.set(key, {
-          socket,
-          requestCount: 1,
-          lastUsed: now,
-          timer,
-        });
-        resolve(socket);
-      },
-    );
+        this.connectionEvents.emit('error', {host, port, error});
 
-    socket.on('error', err => {
-      cleanupSocket(key);
-      reject(err);
+        // Clean up on error
+        this.closeConnection(connectionKey);
+
+        // Only reject if this is happening during connection creation
+        if (!this.connections.has(connectionKey)) {
+          reject(error);
+        }
+      });
+
+      // Handle connection close
+      client.on('close', () => {
+        console.log(
+          `[TcpConnectionManager] Connection closed for ${connectionKey}`,
+        );
+        this.connectionEvents.emit('close', {host, port});
+
+        // Clean up resources but don't auto-reconnect here as this might be intentional
+        this.closeConnection(connectionKey);
+      });
     });
+  }
 
-    socket.on('close', () => {
-      cleanupSocket(key);
+  /**
+   * Refreshes an existing connection
+   */
+  private refreshConnection(host: string, port: number): void {
+    const connectionKey = `${host}:${port}`;
+
+    // Create a new connection which will replace the old one
+    this.createConnection(host, port).catch(error => {
+      console.error(
+        `[TcpConnectionManager] Failed to refresh connection to ${connectionKey}:`,
+        error,
+      );
+
+      // Try again after a short delay
+      setTimeout(() => {
+        this.refreshConnection(host, port);
+      }, 5000); // Retry after 5 seconds
     });
-  });
-};
+  }
 
-const sendModbusRequest = async (
+  /**
+   * Closes and cleans up a connection and its timer
+   */
+  private closeConnection(connectionKey: string): void {
+    // Clear the refresh timer
+    if (this.refreshTimers.has(connectionKey)) {
+      clearTimeout(this.refreshTimers.get(connectionKey));
+      this.refreshTimers.delete(connectionKey);
+    }
+
+    // Close the connection if it exists
+    if (this.connections.has(connectionKey)) {
+      const connection = this.connections.get(connectionKey);
+      if (!connection.destroyed) {
+        try {
+          connection.destroy();
+        } catch (error) {
+          console.error(
+            `[TcpConnectionManager] Error destroying connection: ${error}`,
+          );
+        }
+      }
+      this.connections.delete(connectionKey);
+    }
+  }
+
+  /**
+   * Closes all connections and cleans up resources
+   */
+  public closeAllConnections(): void {
+    for (const connectionKey of this.connections.keys()) {
+      this.closeConnection(connectionKey);
+    }
+  }
+
+  /**
+   * Register for connection events
+   */
+  public on(event: string, callback: (...args: any[]) => void): void {
+    this.connectionEvents.on(event, callback);
+  }
+
+  /**
+   * Unregister from connection events
+   */
+  public off(event: string, callback: (...args: any[]) => void): void {
+    this.connectionEvents.off(event, callback);
+  }
+}
+
+/**
+ * Modified sendModbusRequest that uses the connection manager
+ */
+export const sendModbusRequest = (
   ip: string,
   port: number,
   request: Buffer,
-  timeout: number = DEFAULT_TIMEOUT,
 ): Promise<Buffer> => {
-  let lastError: Error | null = null;
+  return new Promise((resolve, reject) => {
+    const connectionManager = TcpConnectionManager.getInstance();
 
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    try {
-      const socket = await getSocket(ip, port);
+    connectionManager
+      .getConnection(ip, port)
+      .then(client => {
+        console.log(
+          `[sendModbusRequest] Raw Request: ${request.toString('hex')}`,
+        );
 
-      return await new Promise<Buffer>((resolve, reject) => {
         let responseBuffer = Buffer.alloc(0);
-        const timeoutId = setTimeout(() => {
-          cleanup();
-          reject(new Error(`Request timed out after ${timeout}ms`));
-        }, timeout);
+        let requestTimeout: NodeJS.Timeout | null = null;
+        let responseHandler: (data: any) => void;
+        let errorHandler: (error: Error) => void;
 
         const cleanup = () => {
-          clearTimeout(timeoutId);
-          socket.removeListener('data', onData);
-          socket.removeListener('error', onError);
-          socket.removeListener('close', onClose);
+          if (requestTimeout) {
+            clearTimeout(requestTimeout);
+          }
+
+          // Remove our temporary event listeners
+          client.removeListener('data', responseHandler);
+          client.removeListener('error', errorHandler);
         };
 
-        const onData = (data: Buffer) => {
-          responseBuffer = Buffer.concat([responseBuffer, data]);
+        requestTimeout = setTimeout(() => {
+          cleanup();
+          reject(new Error('Modbus request timed out'));
+        }, 5000); // 5 second timeout
+
+        responseHandler = (data: any) => {
+          const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+          responseBuffer = Buffer.concat([responseBuffer, dataBuffer]);
+          console.log(
+            `[sendModbusRequest] Raw Response: ${responseBuffer.toString(
+              'hex',
+            )}`,
+          );
 
           if (responseBuffer.length >= 6) {
-            const expectedLength = 6 + responseBuffer.readUInt16BE(4);
-            if (responseBuffer.length >= expectedLength) {
-              cleanup();
+            // Minimum MBAP header length
+            const expectedLengthMBAP = responseBuffer.readUInt16BE(4);
+            const totalExpectedLength = 6 + expectedLengthMBAP;
 
-              if (responseBuffer[7] & 0x80) {
+            if (responseBuffer.length >= totalExpectedLength) {
+              // Check for Modbus Exception Response
+              if (responseBuffer.length >= 8 && responseBuffer[7] & 0x80) {
+                const functionCode = responseBuffer[7] & 0x7f;
+                const exceptionCode = responseBuffer[8];
+                console.error(
+                  `[sendModbusRequest] Modbus Exception ${exceptionCode} for function ${functionCode}`,
+                );
+                cleanup();
                 reject(
                   new Error(
-                    `Modbus exception ${responseBuffer[8]} for function ${
-                      responseBuffer[7] & 0x7f
-                    }`,
+                    `Modbus Exception ${exceptionCode} for function ${functionCode}`,
                   ),
                 );
               } else {
+                // Success!
+                cleanup();
                 resolve(responseBuffer);
               }
             }
           }
         };
 
-        const onError = (err: Error) => {
+        errorHandler = (error: Error) => {
           cleanup();
-          reject(new Error(`Connection error: ${err.message}`));
+          reject(new Error(`Connection error: ${error.message || error}`));
         };
 
-        const onClose = () => {
-          cleanup();
-          reject(new Error('Connection closed before response'));
-        };
+        // Set up temporary event handlers for this request
+        client.on('data', responseHandler);
+        client.on('error', errorHandler);
 
-        socket.on('data', onData);
-        socket.on('error', onError);
-        socket.on('close', onClose);
-
-        socket.write(request);
+        // Send the request
+        client.write(
+          new Uint8Array(
+            request.buffer,
+            request.byteOffset,
+            request.byteLength,
+          ),
+        );
+      })
+      .catch(error => {
+        reject(new Error(`Failed to get connection: ${error.message}`));
       });
-    } catch (error) {
-      lastError = error as Error;
-      if (attempt < MAX_RETRIES - 1) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-    }
-  }
-
-  throw lastError || new Error('Modbus request failed');
+  });
 };
 
-// Add cleanup function to manually close all sockets when needed
-export const cleanupModbusSockets = () => {
-  socketUsage.forEach((_, key) => {
-    cleanupSocket(key);
-  });
+// Export the connection manager for direct usage
+export const getConnectionManager = () => TcpConnectionManager.getInstance();
+
+// Make sure to clean up on app exit/background
+export const cleanupAllConnections = () => {
+  TcpConnectionManager.getInstance().closeAllConnections();
 };
 
 // --- General Functions ---
