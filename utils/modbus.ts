@@ -9,6 +9,24 @@ interface LampHours {
 // --- Configuration ---
 const MODBUS_UNIT_ID = 1;
 
+// --- Modbus Request Queue ---
+
+interface ModbusRequestQueueItem {
+  ip: string;
+  port: number;
+  request: Buffer;
+  resolve: (value: Buffer) => void;
+  reject: (reason?: any) => void;
+  retries: number;
+  backoffDelay: number;
+}
+
+const MAX_RETRIES = 3; // Maximum number of retries
+const MAX_CONCURRENT_REQUESTS = 1; // Limit the number of concurrent requests
+const requestQueue: ModbusRequestQueueItem[] = [];
+let activeRequests = 0;
+
+
 // --- Helper Functions (Updated for FC16 Write Multiple Registers) ---
 
 /**
@@ -96,15 +114,80 @@ const sendModbusRequest = (
   ip: string,
   port: number,
   request: Buffer,
-): Promise<Buffer> => {
-  return new Promise((resolve, reject) => {
+): Promise<Buffer> => {  
+  return new Promise((resolve, reject) => {    
+    const queueItem: ModbusRequestQueueItem = {      
+      ip,      
+      port,      
+      request,      
+      resolve,      
+      reject,      
+      retries: 0,      
+      backoffDelay: 1000, // Start with a 1-second delay    
+    };    
+    requestQueue.push(queueItem);    
+    processQueue();  
+  });
+};
+
+const processQueue = () => {  
+  if (activeRequests >= MAX_CONCURRENT_REQUESTS || requestQueue.length === 0) {    
+    return; // Max concurrent requests reached or queue is empty  
+  }
+  
+  const queueItem = requestQueue.shift()!; // Dequeue the next item
+  activeRequests++;
+  
+  const { ip, port, request, resolve, reject, retries, backoffDelay } = queueItem;
+
+  console.log(`[processQueue] Processing request, queue size ${requestQueue.length}`);
+
+  const executeRequest = () => {
     const client = TcpSocket.createConnection({host: ip, port}, () => {
       console.log(
         `[sendModbusRequest] Raw Request: ${request.toString('hex')}`,
       );
+
+      //write data to socket
       client.write(
         new Uint8Array(request.buffer, request.byteOffset, request.byteLength),
       );
+      console.log(`[sendModbusRequest] Data written to socket: ${request.toString('hex')}`);
+    });
+
+    client.on('error', error => {
+      console.error(`[sendModbusRequest on error] ${error.message || error}`);
+      handleError(queueItem, client, new Error(`Connection error: ${error.message || error}`));
+    });
+
+    client.on('close', () => {
+      console.log(`[sendModbusRequest on close]`);
+    });
+
+    handleData(queueItem, client);
+  };
+
+  executeRequest();
+};
+
+const handleError = (queueItem: ModbusRequestQueueItem, client: TcpSocket.Socket, error: Error) => {
+  if (queueItem.retries < MAX_RETRIES) {
+    queueItem.retries++;
+    queueItem.backoffDelay *= 2; // Exponential backoff
+    console.log(`[handleError] Retrying request in ${queueItem.backoffDelay}ms, retry count ${queueItem.retries}`);
+    setTimeout(() => {
+      client.destroy();
+      processQueue();
+    }, queueItem.backoffDelay);
+  } else {
+    console.error(`[handleError] Max retries reached for request`);
+    cleanup(queueItem, client, error);
+  }
+};
+
+const handleData = (queueItem: ModbusRequestQueueItem, client: TcpSocket.Socket) => {
+  const { resolve, reject } = queueItem;
+  let requestTimeout: NodeJS.Timeout | null = null;
     });
 
     let responseBuffer = Buffer.alloc(0);
@@ -115,6 +198,8 @@ const sendModbusRequest = (
         clearTimeout(requestTimeout);
         requestTimeout = null;
       }
+
+      console.log(`[cleanup] Cleaning socket`);
       if (!client.destroyed) {
         client.destroy();
       }
@@ -123,6 +208,9 @@ const sendModbusRequest = (
         reject(error); // Reject the promise on error
       }
     };
+    
+    const cleanup = (queueItem:ModbusRequestQueueItem, client: TcpSocket.Socket, error?: Error) => {
+      activeRequests--; // Decrement active requests
 
     requestTimeout = setTimeout(() => {
       cleanup(new Error('Modbus request timed out'));
@@ -148,7 +236,7 @@ const sendModbusRequest = (
             console.error(
               `[sendModbusRequest] Modbus Exception ${exceptionCode} for function ${functionCode}`,
             );
-            cleanup(
+            cleanup(queueItem, client,
               new Error(
                 `Modbus Exception ${exceptionCode} for function ${functionCode}`,
               ),
@@ -156,24 +244,22 @@ const sendModbusRequest = (
           } else {
             // Success!
             cleanup(); // Clear timeout, close client
+            console.log(`[sendModbusRequest] Request resolved successfully`);
             resolve(responseBuffer); // Resolve the promise with the data
           }
         }
         // Else: Wait for more data or timeout
       }
     });
-
-    client.on('error', error => {
-      cleanup(new Error(`Connection error: ${error.message || error}`));
-    });
+    }
 
     client.on('close', () => {
-      if (requestTimeout) {
-        cleanup(new Error('Modbus connection closed unexpectedly'));
-      }
+      console.log(`[sendModbusRequest] Closed`);
+      processQueue();
     });
-  });
-};
+  }
+
+
 
 // --- General Functions ---
 
@@ -202,6 +288,7 @@ export const toggleLamp = async (
     `[toggleLamp] Sending command to turn ${value ? 'ON' : 'OFF'}...`,
   );
 
+
   try {
     console.log(
       `[toggleLamp] Sending Main Request: ${mainRequest.toString('hex')}`,
@@ -212,13 +299,8 @@ export const toggleLamp = async (
     );
 
     // Check the function code
-    if (
-      !(
-        mainResponse &&
-        mainResponse.length >= 12 &&
-        mainResponse[7] === functionCodeCoil
-      )
-    ) {
+    if (!(mainResponse && mainResponse.length >= 12 && mainResponse[7] === functionCodeCoil))
+    {
       throw new Error(
         `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
           'hex',
@@ -226,16 +308,13 @@ export const toggleLamp = async (
       );
     }
 
-    //Check the value of the response based on the value given
-    if (value) {
-      if (mainResponse.readUInt16BE(10) != 0xff00) {
-        throw new Error(
-          `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
-            'hex',
-          )}`,
-        );
+     //Check the value of the response based on the value given
+     if (value){
+      if (mainResponse.readUInt16BE(10) != 0xff00)
+      {
+        throw new Error(`Unexpected response for toggleLamp main request: ${mainResponse?.toString('hex')}`);
       }
-    } else if (mainResponse.readUInt16BE(10) != 0x0000) {
+    } else if (mainResponse.readUInt16BE(10) != 0x0000){
       throw new Error(
         `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
           'hex',

@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback} from 'react';
+import React, {useState, useEffect, useCallback, useMemo} from 'react';
 import {
   View,
   Text,
@@ -90,12 +90,55 @@ export const LampLifeScreen = () => {
 
       setLoading(true);
       try {
-        const devicesFromDb = await new Promise<any[]>(resolve => {
-          getDevicesForSection(section.id, resolve);
-        });
+        const [devicesFromDb, sharedMaxHours] = await Promise.all([
+          new Promise<any[]>(resolve => {
+            getDevicesForSection(section.id, resolve);
+          }),
+          readLifeHoursSetpoint(section.ip, 502)
+            .catch((error: any) => {
+              logStatus(
+                `Failed to fetch shared max hours: ${error.message || String(error)}`,
+                true,
+              );
+              return null;
+            }),
+        ]);
+
         setDevices(devicesFromDb || []);
-      } catch (error: any) {
-        logStatus(`Database error fetching devices: ${error.message}`, true);
+
+        if (!devicesFromDb || devicesFromDb.length === 0) {
+          logStatus(`No devices found for section ${section.name}.`);
+          setLampHours({});
+          setLoading(false);
+          return;
+        }
+
+        const fetchedHours: {[deviceId: number]: LampHours} = {};
+        const deviceIds = devicesFromDb.map(d => d.id).sort((a, b) => a - b); // Process in order
+
+        logStatus(`Reading shared max hours for section...`);
+
+        if (sharedMaxHours !== null) {
+          logStatus(`Shared max hours fetched successfully: ${sharedMaxHours}`);
+          for (const deviceId of deviceIds) {
+            const lampIndex = deviceId;
+            if (lampIndex < 1 || lampIndex > 4) {
+              logStatus(`Skipping device ID ${deviceId} - invalid lamp index.`);
+              continue;
+            }
+            fetchedHours[deviceId] = {currentHours: sharedMaxHours};
+          }
+        } else {
+          logStatus('Shared max hours not available. Defaulting to 0.', true);
+          for (const deviceId of deviceIds) {
+            fetchedHours[deviceId] = {currentHours: 0};
+          }
+        }
+
+        setLampHours(fetchedHours);
+        logStatus('Finished fetching lamp data.');
+      } catch (dbError: any) {
+        logStatus(`Database error fetching devices: ${dbError.message}`, true);
         setDevices([]);
       } finally {
         setLoading(false);
@@ -103,6 +146,15 @@ export const LampLifeScreen = () => {
     },
     [logStatus],
   );
+
+  // --- Handle Input Change during Edit ---
+  const handleInputChange = useCallback((deviceId: number, text: string) => {
+    const numericText = text.replace(/[^0-9.]/g, '');
+    setEditedMaxHours(prev => ({
+      ...prev,
+      [deviceId]: numericText,
+    }));
+  }, []);
 
   // Fetch sections list
   useEffect(() => {
@@ -161,20 +213,6 @@ export const LampLifeScreen = () => {
     logStatus('Changes cancelled.');
   };
 
-  const handleInputChange = (deviceId: number, text: string) => {
-    const numericText = text.replace(/[^0-9.]/g, '');
-    setEditedMaxHours(prev => {
-      const newState = {...prev};
-      devices.forEach((device, index) => {
-        console.log(`Device ID: ${device.id}, Index: ${index}`);
-
-        if (index >= 0 && index <= 4) {
-          newState[index] = numericText;
-        }
-      });
-      return newState;
-    });
-  };
 
   const executeSaveChanges = async () => {
     setModalVisible(false);
@@ -299,16 +337,17 @@ export const LampLifeScreen = () => {
     const isMonitoredLamp = deviceId >= 1 && deviceId <= 4;
     const lampData = getLampDataFromStore(deviceId);
     const editedValueStr = editedMaxHours[deviceId];
+    const displayMaxHoursStr = useMemo(() => {
+      if (edit && editedValueStr !== undefined) {
+        return editedValueStr;
+      }
+      if (hours.currentHours !== null) {
+        return Math.round(hours.currentHours).toString();
+      }
+      return 'N/A';
+    }, [edit, editedValueStr, hours.currentHours]);
 
-    const displayMaxHoursStr = edit
-      ? editedValueStr !== undefined
-        ? editedValueStr
-        : lampData.maxHours !== null
-        ? Math.round(lampData.maxHours).toString()
-        : '0'
-      : lampData.maxHours !== null
-      ? Math.round(lampData.maxHours).toString()
-      : 'N/A';
+    
 
     return (
       <View style={styles.gridItem}>
@@ -336,8 +375,8 @@ export const LampLifeScreen = () => {
               placeholderTextColor={COLORS.gray[600]}
               keyboardType="decimal-pad"
               onChangeText={text => {
-                const numericText = text.replace(/[^0-9.]/g, '');
-                if (numericText.length <= 10) {
+                const numericText = text.replace(/[^0-9.]/g, ''); // Allow only numbers and a single decimal point
+                if (numericText.length <= 5) {
                   handleInputChange(deviceId, numericText);
                 }
               }}
@@ -423,6 +462,7 @@ export const LampLifeScreen = () => {
                 edit,
                 workingHours,
                 editedMaxHours,
+                handleInputChange,
                 focusedInputId,
                 loading,
               }}
