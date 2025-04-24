@@ -79,6 +79,7 @@ const GridItem = memo(
       currentHours: null,
       maxHours: null,
     };
+    console.log('Hours Info:', hoursInfo);
 
     const currentHours = hoursInfo.currentHours ?? 0;
     const maxHours = hoursInfo.maxHours ?? 0;

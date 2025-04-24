@@ -65,7 +65,8 @@ export const LampLifeScreen = () => {
       const sectionData = workingHours[selectedSection.id];
       if (!sectionData) return {currentHours: null, maxHours: null};
 
-      return sectionData[deviceId] || {currentHours: null, maxHours: null};
+      const deviceData = sectionData[deviceId];
+      return deviceData || {currentHours: null, maxHours: null};
     },
     [workingHours, selectedSection],
   );
@@ -80,20 +81,9 @@ export const LampLifeScreen = () => {
 
       setLoading(true);
       try {
-        const [devicesFromDb, sharedMaxHours] = await Promise.all([
-          new Promise<any[]>(resolve => {
-            getDevicesForSection(section.id, resolve);
-          }),
-          readLifeHoursSetpoint(section.ip, 502)
-            .catch((error: any) => {
-              logStatus(
-                `Failed to fetch shared max hours: ${error.message || String(error)}`,
-                true,
-              );
-              return null;
-            }),
-        ]);
-
+        const devicesFromDb = await new Promise<any[]>(resolve => {
+          getDevicesForSection(section.id, resolve);
+        });
         setDevices(devicesFromDb || []);
       } catch (error: any) {
         setDevices([]);
@@ -103,15 +93,6 @@ export const LampLifeScreen = () => {
     },
     [],
   );
-
-  // --- Handle Input Change during Edit ---
-  const handleInputChange = useCallback((deviceId: number, text: string) => {
-    const numericText = text.replace(/[^0-9.]/g, '');
-    setEditedMaxHours(prev => ({
-      ...prev,
-      [deviceId]: numericText,
-    }));
-  }, []);
 
   // Fetch sections list
   useEffect(() => {
@@ -194,15 +175,23 @@ export const LampLifeScreen = () => {
         const originalMax = getLampDataFromStore(deviceId).maxHours ?? 0;
 
         if (!isNaN(editedValueNum) && editedValueNum !== originalMax) {
-          await setLampMaxHours(selectedSection.ip, 502, editedValueNum);
+          await setLampMaxHours(
+            selectedSection.ip,
+            502,
+            editedValueNum,
+            (msg: string) => {
+              console.log(`[Lamp Life] ${msg}`);
+            },
+          );
           anyChangesSaved = true;
         }
       }
 
       if (anyChangesSaved) {
-      } else {
+        // Changes were saved successfully
       }
     } catch (error: any) {
+      console.error('Error saving lamp hours:', error);
     } finally {
       setLoading(false);
       setEdit(false);
@@ -217,7 +206,7 @@ export const LampLifeScreen = () => {
       const editedValueStr = editedMaxHours[deviceId];
       const editedValueNum = parseInt(editedValueStr, 10);
 
-      if (!isNaN(editedValueNum)) {
+      if (!isNaN(editedValueNum) && editedValueNum !== originalMax) {
         changesMade = true;
         break;
       }
@@ -266,22 +255,16 @@ export const LampLifeScreen = () => {
   );
 
   const renderGridItem = ({item}: {item: any}) => {
-    const deviceId =
-      item.id > 6 ? item.id - (selectedSection?.id - 1) * 6 : item.id;
+    const deviceId = item.id;
     const isMonitoredLamp = deviceId >= 1 && deviceId <= 4;
     const lampData = getLampDataFromStore(deviceId);
-    const editedValueStr = editedMaxHours[deviceId];
-    const displayMaxHoursStr = useMemo(() => {
-      if (edit && editedValueStr !== undefined) {
-        return editedValueStr;
-      }
-      if (hours.currentHours !== null) {
-        return Math.round(hours.currentHours).toString();
-      }
-      return 'N/A';
-    }, [edit, editedValueStr, hours.currentHours]);
 
-    
+    const displayMaxHours =
+      edit && editedMaxHours[deviceId] !== undefined
+        ? editedMaxHours[deviceId]
+        : lampData.maxHours !== null
+        ? lampData.maxHours?.toString()
+        : 'N/A';
 
     return (
       <View style={styles.gridItem}>
@@ -303,7 +286,7 @@ export const LampLifeScreen = () => {
                 focusedInputId === deviceId && styles.focusedInput,
                 !isMonitoredLamp && {opacity: 0.5},
               ]}
-              value={displayMaxHoursStr}
+              value={displayMaxHours}
               editable={edit && isMonitoredLamp && !loading}
               placeholder="Max Hrs"
               placeholderTextColor={COLORS.gray[600]}

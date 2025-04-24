@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback, memo} from 'react';
+import React, {useState, useEffect, useCallback} from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   StyleSheet,
   FlatList,
   TextInput,
+  ActivityIndicator,
   Alert,
 } from 'react-native';
 import Layout from '../../components/Layout';
@@ -21,9 +22,11 @@ import {
 import CustomTabBar from '../../components/CustomTabBar';
 import PopupModal from '../../components/PopupModal';
 import {getSectionsWithStatus} from '../../utils/db';
-import {setCleaningHoursSetpoint} from '../../utils/modbus';
+import {
+  readCleaningHoursSetpoint,
+  setCleaningHoursSetpoint,
+} from '../../utils/modbus';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
-import useCleaningHoursStore from '../../utils/cleaningHoursStore';
 
 interface SectionSummary {
   id: number;
@@ -32,68 +35,32 @@ interface SectionSummary {
   working: boolean;
 }
 
-// Memoized List Item Component
-const ScrollListItem = memo(
-  ({
-    item,
-    isSelected,
-    onPress,
-  }: {
-    item: SectionSummary;
-    isSelected: boolean;
-    onPress: () => void;
-  }) => (
-    <TouchableOpacity
-      onPress={onPress}
-      style={[
-        styles.scrollItem,
-        {
-          borderLeftColor: isSelected ? COLORS.teal[500] : COLORS.gray[200],
-        },
-      ]}>
-      <Text
-        style={[
-          styles.scrollItemText,
-          {
-            color: isSelected ? COLORS.teal[500] : COLORS.gray[800],
-          },
-        ]}>
-        {item.name}
-      </Text>
-    </TouchableOpacity>
-  ),
-);
-
-// Memoized Modal Content
-const ModalContent = memo(
-  ({sectionName, hours}: {sectionName?: string; hours: string}) => (
-    <View style={styles.modalContent}>
-      <View style={styles.modalIconWrapper}>
-        <RepeatIcon width={40} height={40} />
-      </View>
-      <Text style={styles.modalTitle}>Update Cleaning Hours?</Text>
-      <Text style={styles.modalSubText}>
-        Set cleaning hours for '{sectionName}' to
-        <Text style={{fontWeight: 'bold'}}> {hours}</Text> hours?
-      </Text>
-    </View>
-  ),
-);
-
 const CleaningScreen = () => {
   const [sections, setSections] = useState<SectionSummary[]>([]);
   const [selectedSection, setSelectedSection] = useState<SectionSummary | null>(
     null,
   );
+  const [currentSetpoint, setCurrentSetpoint] = useState<number | null>(null);
   const [edit, setEdit] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [newValue, setNewValue] = useState<string>('');
-
+  const [statusMessage, setStatusMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const {setCurrentSectionId} = useCurrentSectionStore();
-  const {remainingCleaningHours, fetchCleaningHours} = useCleaningHoursStore();
 
-  // Fetch sections data
+  const logStatus = useCallback((message: string, isError = false) => {
+    console.log(`[Cleaning Screen Status] ${message}`);
+    setStatusMessage(message);
+    const timeoutId = setTimeout(
+      () => setStatusMessage(''),
+      isError ? 6000 : 4000,
+    );
+    return () => clearTimeout(timeoutId);
+  }, []);
+
   useEffect(() => {
+    setLoading(true);
     let isMounted = true;
     getSectionsWithStatus(fetchedSections => {
       if (!isMounted) return;
@@ -107,100 +74,198 @@ const CleaningScreen = () => {
         }));
       setSections(formattedSections);
 
-      if (formattedSections.length > 0 && !selectedSection) {
-        setSelectedSection(formattedSections[0]);
-      } else if (formattedSections.length === 0) {
+      if (formattedSections.length > 0) {
+        if (!selectedSection) {
+          setSelectedSection(formattedSections[0]);
+        }
+      } else {
+        logStatus('No sections with IP addresses found.', true);
         setSelectedSection(null);
+        setCurrentSetpoint(null);
         setNewValue('');
+        setLoading(false);
       }
     });
     return () => {
       isMounted = false;
     };
-  }, [selectedSection]);
+  }, [logStatus, selectedSection]);
 
-  // Update current setpoint when selected section changes
-  useEffect(() => {
-    if (selectedSection?.id) {
-      const cleaningData = remainingCleaningHours[selectedSection.id];
-      if (cleaningData) {
-        const formattedValue = Math.round(
-          cleaningData.setpoint ?? 0,
-        ).toString();
-        setNewValue(formattedValue);
-      } else {
-        setNewValue('');
-      }
-    } else {
+  // Ensure the TextInput shows only decimal values
+  const fetchCurrentSetpoint = useCallback(async () => {
+    if (!selectedSection || !selectedSection.ip) {
+      setCurrentSetpoint(null);
       setNewValue('');
-    }
-  }, [selectedSection, remainingCleaningHours]);
-
-  // Handlers
-  const handleSectionSelect = useCallback(
-    (item: SectionSummary) => {
-      if (item.id !== selectedSection?.id) {
-        setSelectedSection(item);
-        setEdit(false);
-        setCurrentSectionId(item.id);
+      setLoading(false);
+      if (selectedSection) {
+        logStatus(`Section '${selectedSection.name}' has no IP address.`, true);
       }
-    },
-    [selectedSection?.id, setCurrentSectionId],
-  );
+      return;
+    }
 
-  const handleSaveChanges = useCallback(async () => {
-    if (!selectedSection?.ip) {
+    setLoading(true);
+    setCurrentSetpoint(null);
+    setNewValue('');
+    logStatus(`Fetching cleaning setpoint for ${selectedSection.name}...`);
+
+    try {
+      const value = await readCleaningHoursSetpoint(selectedSection.ip, 502);
+      console.log(`[Debug] Fetched cleaning hours setpoint: ${value}`);
+      const formattedValue = Math.round(value ?? 0).toString(); // Round to whole number
+      setCurrentSetpoint(parseFloat(formattedValue));
+      setNewValue(formattedValue); // Ensure the TextInput shows the whole number
+      logStatus(`Fetched cleaning hours setpoint: ${formattedValue} hours`);
+    } catch (error: any) {
+      console.error(
+        `[Debug] Error fetching cleaning hours setpoint: ${error.message}`,
+      );
+      const errorMsg = `Error fetching setpoint for ${selectedSection.name}: ${error.message}`;
+      logStatus(errorMsg, true);
+      setCurrentSetpoint(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedSection, logStatus]);
+
+  useEffect(() => {
+    fetchCurrentSetpoint();
+  }, [fetchCurrentSetpoint]);
+
+  const handleSaveChanges = async () => {
+    if (!selectedSection || !selectedSection.ip) {
+      logStatus('No section selected or section has no IP.', true);
       setModalVisible(false);
       return;
     }
 
     const numericNewValue = parseInt(newValue, 10);
+    if (
+      isNaN(numericNewValue) ||
+      numericNewValue < 0 ||
+      numericNewValue > 65535
+    ) {
+      logStatus(
+        'Invalid Input: Please enter a valid number between 0 and 65535.',
+        true,
+      );
+      Alert.alert(
+        'Invalid Input',
+        'Please enter a valid number between 0 and 65535.',
+      );
+      return;
+    }
 
     setModalVisible(false);
+    setIsSaving(true);
+    setLoading(true);
+    logStatus(
+      `Setting cleaning hours for ${selectedSection.name} to ${numericNewValue}...`,
+    );
 
     try {
-      await setCleaningHoursSetpoint(selectedSection.ip, 502, numericNewValue);
-      // Refresh the data after successful update
-      await fetchCleaningHours();
+      await setCleaningHoursSetpoint(
+        selectedSection.ip,
+        502,
+        numericNewValue,
+        logStatus,
+      );
+
+      logStatus(
+        `Cleaning hours setpoint updated successfully for ${selectedSection.name}.`,
+      );
+      setCurrentSetpoint(numericNewValue);
       setEdit(false);
-    } catch (error) {
-      Alert.alert('Error', 'Failed to update cleaning hours');
+      Alert.alert('Success', 'Setpoint updated successfully.');
+    } catch (error: any) {
+      const errorMsg = `Failed to set cleaning hours for ${selectedSection.name}: ${error.message}`;
+      logStatus(errorMsg, true);
+      Alert.alert('Error', errorMsg);
+    } finally {
+      setIsSaving(false);
+      setLoading(false);
     }
-  }, [selectedSection, newValue, fetchCleaningHours]);
+  };
 
-  const handleCancelEdit = useCallback(() => {
-    setEdit(false);
-    if (selectedSection?.id) {
-      const cleaningData = remainingCleaningHours[selectedSection.id];
-      setNewValue(cleaningData?.setpoint?.toString() ?? '');
-    }
-  }, [selectedSection, remainingCleaningHours]);
-
-  const handleEditPress = useCallback(() => {
-    setEdit(true);
-  }, []);
-
-  // Render function for FlatList
-  const renderScrollItem = useCallback(
-    ({item}: {item: SectionSummary}) => (
-      <ScrollListItem
-        item={item}
-        isSelected={item.id === selectedSection?.id}
-        onPress={() => handleSectionSelect(item)}
-      />
-    ),
-    [handleSectionSelect, selectedSection?.id],
+  const renderScrollItem = ({item}: {item: SectionSummary}) => (
+    <TouchableOpacity
+      onPress={() => {
+        if (item.id !== selectedSection?.id && !isSaving) {
+          setSelectedSection(item);
+          setEdit(false);
+          setCurrentSectionId(item.id);
+        }
+      }}
+      style={[
+        styles.scrollItem,
+        {
+          borderLeftColor:
+            item.id === selectedSection?.id
+              ? COLORS.teal[500]
+              : COLORS.gray[200],
+          opacity: isSaving ? 0.6 : 1,
+        },
+      ]}
+      disabled={loading || isSaving}>
+      <Text
+        style={[
+          styles.scrollItemText,
+          {
+            color:
+              item.id === selectedSection?.id
+                ? COLORS.teal[500]
+                : COLORS.gray[800],
+          },
+        ]}>
+        {item.name}
+      </Text>
+    </TouchableOpacity>
   );
 
   return (
     <Layout>
+      {(loading || isSaving) && (
+        <View style={styles.loadingOverlay}>
+          <ActivityIndicator size="large" color={COLORS.teal[500]} />
+          <Text style={styles.loadingText}>
+            {isSaving ? 'Saving...' : 'Loading...'}
+          </Text>
+        </View>
+      )}
+
+      {statusMessage ? (
+        <View style={styles.statusMessageContainer}>
+          <Text
+            style={[
+              styles.statusMessageText,
+              {
+                color:
+                  statusMessage.includes('Error') ||
+                  statusMessage.includes('Failed')
+                    ? 'red'
+                    : 'green',
+              },
+            ]}>
+            {statusMessage}
+          </Text>
+        </View>
+      ) : null}
+
       <PopupModal
         visible={modalVisible}
         onConfirm={handleSaveChanges}
         onClose={() => setModalVisible(false)}
         title="Confirmation needed"
         Icon={CheckIcon}>
-        <ModalContent sectionName={selectedSection?.name} hours={newValue} />
+        <View style={styles.modalContent}>
+          <View style={styles.modalIconWrapper}>
+            <RepeatIcon width={40} height={40} />
+          </View>
+          <Text style={styles.modalTitle}>Update Cleaning Hours?</Text>
+          <Text style={styles.modalSubText}>
+            Set cleaning hours for '{selectedSection?.name}' to{' '}
+            <Text style={{fontWeight: 'bold'}}>{newValue}</Text> hours?
+          </Text>
+        </View>
       </PopupModal>
 
       <View style={styles.header}>
@@ -216,22 +281,22 @@ const CleaningScreen = () => {
                 data={sections}
                 renderItem={renderScrollItem}
                 keyExtractor={item => item.id.toString()}
-                initialNumToRender={10}
-                maxToRenderPerBatch={5}
-                windowSize={5}
-                extraData={selectedSection?.id}
                 showsVerticalScrollIndicator={false}
+                extraData={`${selectedSection?.id}-${isSaving}`}
               />
-            ) : (
+            ) : !loading ? (
               <View style={styles.noSectionsContainer}>
-                <Text style={styles.noSectionsText}>No sections found</Text>
+                <Text style={styles.noSectionsText}>No sections found.</Text>
+                <Text style={styles.noSectionsText}>
+                  Ensure sections have IP addresses.
+                </Text>
               </View>
-            )}
+            ) : null}
           </View>
         </View>
 
         <View style={styles.rightContainer}>
-          {selectedSection && (
+          {selectedSection ? (
             <View style={styles.gridItem}>
               <View style={styles.card}>
                 <View style={styles.cardHeader}>
@@ -246,14 +311,18 @@ const CleaningScreen = () => {
                 <TextInput
                   style={[styles.cardInput, !edit && styles.cardInputDisabled]}
                   placeholder="---"
-                  editable={edit}
+                  editable={edit && !isSaving && !loading}
                   value={newValue}
                   keyboardType="numeric"
                   onChangeText={setNewValue}
                 />
               </View>
             </View>
-          )}
+          ) : !loading ? (
+            <View style={styles.noSectionsContainer}>
+              <Text style={styles.noSectionsText}>Select a section</Text>
+            </View>
+          ) : null}
         </View>
       </View>
 
@@ -261,33 +330,55 @@ const CleaningScreen = () => {
         {edit ? (
           <View style={styles.footerButtonsContainer}>
             <TouchableOpacity
-              style={styles.cancelButton}
-              onPress={handleCancelEdit}>
+              style={[
+                styles.cancelButton,
+                {opacity: loading || isSaving ? 0.5 : 1},
+              ]}
+              onPress={() => {
+                setEdit(false);
+                setNewValue(currentSetpoint?.toString() ?? '');
+              }}
+              disabled={loading || isSaving}>
               <CloseIcon fill={COLORS.gray[600]} width={24} height={24} />
               <Text style={styles.buttonText}>Cancel</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.saveButton}
+              style={[
+                styles.saveButton,
+                {opacity: loading || isSaving ? 0.5 : 1},
+              ]}
               onPress={() => setModalVisible(true)}
               disabled={
-                !newValue ||
-                newValue ===
-                  (remainingCleaningHours[
-                    selectedSection?.id
-                  ]?.setpoint?.toString() ?? '')
+                loading ||
+                isSaving ||
+                !selectedSection ||
+                newValue === (currentSetpoint?.toString() ?? '')
               }>
               <CheckIcon2 fill={COLORS.good[600]} width={30} height={30} />
-              <Text style={styles.buttonText}>Save changes</Text>
+              <Text style={[styles.buttonText]}>Save changes</Text>
             </TouchableOpacity>
           </View>
         ) : (
           <View style={styles.footerButtonsContainer}>
             <TouchableOpacity
-              style={styles.editButton}
-              onPress={handleEditPress}
+              style={[
+                styles.editButton,
+                {
+                  opacity:
+                    loading || isSaving
+                      ? // !selectedSection ||
+                        // currentSetpoint === null
+                        0.5
+                      : 1,
+                },
+              ]}
+              onPress={() => setEdit(true)}
               disabled={
-                !selectedSection || !remainingCleaningHours[selectedSection.id]
+                loading ||
+                isSaving ||
+                !selectedSection ||
+                currentSetpoint === null
               }>
               <EditIcon fill={COLORS.gray[600]} width={24} height={24} />
               <Text style={styles.buttonText}>Edit Cleaning Hours</Text>
@@ -298,6 +389,7 @@ const CleaningScreen = () => {
     </Layout>
   );
 };
+
 const styles = StyleSheet.create({
   loadingOverlay: {
     position: 'absolute',

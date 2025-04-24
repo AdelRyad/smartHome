@@ -3,93 +3,241 @@ import {Buffer} from 'buffer';
 
 // --- Configuration ---
 const MODBUS_UNIT_ID = 1;
-const MAX_CONNECTIONS = 5;
 const REQUEST_TIMEOUT = 5000; // 5 seconds
-const CONNECTION_REFRESH_INTERVAL = 2 * 60 * 1000; // 2 minutes
-const REQUEST_DELAY = 250; // Delay between requests in ms
-const MAX_QUEUE_SIZE = 100;
-const MAX_RESPONSE_SIZE = 1024 * 1024; // 1MB
+const RECONNECT_DELAY = 2000; // 2 seconds
+const MAX_RETRIES = 3;
+const CONNECTION_REFRESH_INTERVAL = 60000; // 1 minute
 
-// --- Shared Types ---
-interface LampHours {
-  currentHours: number;
+// --- Connection Manager ---
+// --- Connection Manager ---
+class ModbusConnectionManager {
+  private static instance: ModbusConnectionManager;
+  private connections: Map<string, any> = new Map();
+  private connectionPromises: Map<string, Promise<any>> = new Map();
+
+  public static getInstance(): ModbusConnectionManager {
+    if (!ModbusConnectionManager.instance) {
+      ModbusConnectionManager.instance = new ModbusConnectionManager();
+    }
+    return ModbusConnectionManager.instance;
+  }
+
+  public async getConnection(ip: string, port: number): Promise<any> {
+    const connectionKey = `${ip}:${port}`;
+
+    // Return existing connection if valid
+    if (this.connections.has(connectionKey)) {
+      const conn = this.connections.get(connectionKey);
+      if (conn && !conn.destroyed && conn.writable) {
+        return conn;
+      }
+      this.closeConnection(connectionKey);
+    }
+
+    // If a connection attempt is already in progress, wait for it
+    if (this.connectionPromises.has(connectionKey)) {
+      return this.connectionPromises.get(connectionKey);
+    }
+
+    // Create new connection promise
+    const connectionPromise = this.createConnection(ip, port);
+    this.connectionPromises.set(connectionKey, connectionPromise);
+
+    try {
+      const connection = await connectionPromise;
+      this.connections.set(connectionKey, connection);
+      this.setupConnectionRefresh(ip, port);
+      return connection;
+    } finally {
+      this.connectionPromises.delete(connectionKey);
+    }
+  }
+
+  private async createConnection(ip: string, port: number): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const connectionKey = `${ip}:${port}`;
+      console.log(`Creating new connection to ${connectionKey}`);
+
+      const client = TcpSocket.createConnection({host: ip, port}, () => {
+        console.log(`Connected to ${connectionKey}`);
+        client.setTimeout(REQUEST_TIMEOUT);
+        resolve(client);
+      });
+
+      client.on('error', error => {
+        console.error(`Connection error for ${connectionKey}:`, error);
+        this.closeConnection(connectionKey);
+        reject(error);
+      });
+
+      client.on('close', () => {
+        console.log(`Connection closed for ${connectionKey}`);
+        this.closeConnection(connectionKey);
+      });
+
+      client.on('timeout', () => {
+        console.log(`Connection timeout for ${connectionKey}`);
+        client.destroy();
+        reject(new Error('Connection timeout'));
+      });
+    });
+  }
+
+  private setupConnectionRefresh(ip: string, port: number) {
+    const connectionKey = `${ip}:${port}`;
+    const refreshInterval = setInterval(() => {
+      if (!this.connections.has(connectionKey)) {
+        clearInterval(refreshInterval);
+        return;
+      }
+
+      const conn = this.connections.get(connectionKey);
+      if (conn && !conn.destroyed && conn.writable) {
+        // Send a simple read request to keep connection alive
+        const testRequest = createModbusRequest(MODBUS_UNIT_ID, 0x03, 0, 1);
+        conn.write(testRequest, err => {
+          if (err) {
+            console.log(`Refresh failed for ${connectionKey}, reconnecting...`);
+            this.closeConnection(connectionKey);
+          }
+        });
+      }
+    }, CONNECTION_REFRESH_INTERVAL);
+  }
+
+  public closeConnection(connectionKey: string) {
+    if (this.connections.has(connectionKey)) {
+      const conn = this.connections.get(connectionKey);
+      if (conn && !conn.destroyed) {
+        conn.destroy();
+      }
+      this.connections.delete(connectionKey);
+    }
+  }
+
+  public closeAllConnections() {
+    for (const [key] of this.connections) {
+      this.closeConnection(key);
+    }
+  }
 }
 
-// --- Configuration ---
-const MODBUS_UNIT_ID = 1;
+// --- Request Manager ---
+class ModbusRequestManager {
+  private static instance: ModbusRequestManager;
+  private pendingRequests: Map<
+    number,
+    {resolve: (value: Buffer) => void; reject: (reason?: any) => void}
+  > = new Map();
+  private nextTransactionId = 1;
 
-// --- Modbus Request Queue ---
+  public static getInstance(): ModbusRequestManager {
+    if (!ModbusRequestManager.instance) {
+      ModbusRequestManager.instance = new ModbusRequestManager();
+    }
+    return ModbusRequestManager.instance;
+  }
 
-interface ModbusRequestQueueItem {
-  ip: string;
-  port: number;
-  request: Buffer;
-  resolve: (value: Buffer) => void;
-  reject: (reason?: any) => void;
-  retries: number;
-  backoffDelay: number;
+  public async executeRequest(
+    ip: string,
+    port: number,
+    request: Buffer,
+  ): Promise<Buffer> {
+    const transactionId = this.nextTransactionId++;
+    request.writeUInt16BE(transactionId, 0);
+
+    return new Promise((resolve, reject) => {
+      this.pendingRequests.set(transactionId, {resolve, reject});
+
+      const connectionManager = ModbusConnectionManager.getInstance();
+      let connection: any;
+
+      const cleanup = () => {
+        if (connection) {
+          connection.removeListener('data', dataHandler);
+          connection.removeListener('error', errorHandler);
+        }
+        this.pendingRequests.delete(transactionId);
+        clearTimeout(timeout);
+      };
+
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error('Request timeout'));
+      }, REQUEST_TIMEOUT);
+
+      const dataHandler = (data: Buffer) => {
+        try {
+          const responseTransactionId = data.readUInt16BE(0);
+          if (responseTransactionId !== transactionId) return;
+
+          const functionCode = data[7];
+          if (functionCode & 0x80) {
+            const errorCode = data[8];
+            cleanup();
+            reject(new Error(`Modbus exception ${errorCode}`));
+            return;
+          }
+
+          cleanup();
+          resolve(data);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      };
+
+      const errorHandler = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+
+      connectionManager
+        .getConnection(ip, port)
+        .then(conn => {
+          connection = conn;
+          connection.on('data', dataHandler);
+          connection.on('error', errorHandler);
+          connection.write(request);
+        })
+        .catch(error => {
+          cleanup();
+          reject(error);
+        });
+    });
+  }
 }
 
-const MAX_RETRIES = 3; // Maximum number of retries
-const MAX_CONCURRENT_REQUESTS = 1; // Limit the number of concurrent requests
-const requestQueue: ModbusRequestQueueItem[] = [];
-let activeRequests = 0;
-
-
-// --- Helper Functions (Updated for FC16 Write Multiple Registers) ---
-
-/**
- * Creates a Modbus TCP request buffer (MBAP Header + PDU).
- * Addresses passed to this function should be 0-based.
- */
-const createModbusRequest = (
-  unitId: number, // Modbus unit ID
-  functionCode: number, // Modbus function code
-  startAddress: number, // Register address (0-based)
-  quantity: number, // Number of items (coils/registers) OR the value for single writes (FC5, FC6)
-  writeData?: Buffer, // Data buffer for multiple write operations (FC15, FC16)
-): Buffer => {
+// --- Helper Functions ---
+function createModbusRequest(
+  unitId: number,
+  functionCode: number,
+  startAddress: number,
+  quantity: number,
+  writeData?: Buffer,
+): Buffer {
   let pdu: Buffer;
 
-  if (
-    functionCode === 0x01 ||
-    functionCode === 0x02 ||
-    functionCode === 0x03 ||
-    functionCode === 0x04
-  ) {
-    // Read Coils/Inputs/Registers: FC(1), StartAddr(2), Quantity(2)
+  if ([0x01, 0x02, 0x03, 0x04].includes(functionCode)) {
     pdu = Buffer.alloc(5);
     pdu.writeUInt8(functionCode, 0);
     pdu.writeUInt16BE(startAddress, 1);
     pdu.writeUInt16BE(quantity, 3);
-  } else if (functionCode === 0x05) {
-    // Write Single Coil
-    // FC(1), Addr(2), Value(2 - 0xFF00/0x0000)
+  } else if (functionCode === 0x05 || functionCode === 0x06) {
     pdu = Buffer.alloc(5);
     pdu.writeUInt8(functionCode, 0);
     pdu.writeUInt16BE(startAddress, 1);
-    pdu.writeUInt16BE(quantity, 3); // quantity holds the value
-  } else if (functionCode === 0x06) {
-    // Write Single Register
-    // FC(1), Addr(2), Value(2)
-    pdu = Buffer.alloc(5);
-    pdu.writeUInt8(functionCode, 0);
-    pdu.writeUInt16BE(startAddress, 1);
-    pdu.writeUInt16BE(quantity, 3); // quantity holds the value
+    pdu.writeUInt16BE(quantity, 3);
   } else if (functionCode === 0x0f && writeData) {
-    // Write Multiple Coils
-    // FC(1), StartAddr(2), QuantityCoils(2), ByteCount(1), Data(...)
     const byteCount = writeData.length;
     pdu = Buffer.alloc(6 + byteCount);
     pdu.writeUInt8(functionCode, 0);
     pdu.writeUInt16BE(startAddress, 1);
-    pdu.writeUInt16BE(quantity, 3); // quantity is number of coils
+    pdu.writeUInt16BE(quantity, 3);
     pdu.writeUInt8(byteCount, 5);
     writeData.copy(pdu, 6);
   } else if (functionCode === 0x10 && writeData) {
-    // Write Multiple Registers
-    // FC(1), StartAddr(2), QuantityRegs(2), ByteCount(1), Data(...)
-    const quantity = writeData.length / 2; // Number of 16-bit registers
+    const quantity = writeData.length / 2;
     const byteCount = writeData.length;
     pdu = Buffer.alloc(6 + byteCount);
     pdu.writeUInt8(functionCode, 0);
@@ -98,186 +246,30 @@ const createModbusRequest = (
     pdu.writeUInt8(byteCount, 5);
     writeData.copy(pdu, 6);
   } else {
-    console.error(
-      `Unsupported Modbus request structure for func: ${functionCode} / data: ${writeData}`,
-    );
-    // Minimal PDU to avoid crash, likely results in Modbus exception
-    pdu = Buffer.from([functionCode]);
+    // throw new Error(`Unsupported function code: ${functionCode}`);
   }
 
-  // MBAP Header: TransID(2), ProtoID(2), Len(2), UnitID(1)
   const mbapHeader = Buffer.alloc(7);
-  mbapHeader.writeUInt16BE(Math.floor(Math.random() * 65535), 0); // Transaction ID
-  mbapHeader.writeUInt16BE(0x0000, 2); // Protocol ID
-  mbapHeader.writeUInt16BE(pdu.length + 1, 4); // Length = PDU length + Unit ID byte
-  mbapHeader.writeUInt8(unitId, 6); // Unit ID
+  mbapHeader.writeUInt16BE(0, 0); // Transaction ID will be set later
+  mbapHeader.writeUInt16BE(0x0000, 2);
+  mbapHeader.writeUInt16BE(pdu.length + 1, 4);
+  mbapHeader.writeUInt8(unitId, 6);
 
   return Buffer.concat([mbapHeader, pdu]);
-};
+}
 
-/**
- * Helper function to send a Modbus request and return a Promise resolving with the response Buffer.
- * Includes basic timeout and exception handling.
- */
+// --- Public API ---
 const sendModbusRequest = (
   ip: string,
   port: number,
   request: Buffer,
-): Promise<Buffer> => {  
-  return new Promise((resolve, reject) => {    
-    const queueItem: ModbusRequestQueueItem = {      
-      ip,      
-      port,      
-      request,      
-      resolve,      
-      reject,      
-      retries: 0,      
-      backoffDelay: 1000, // Start with a 1-second delay    
-    };    
-    requestQueue.push(queueItem);    
-    processQueue();  
-  });
+): Promise<Buffer> => {
+  return ModbusRequestManager.getInstance().executeRequest(ip, port, request);
 };
 
-const processQueue = () => {  
-  if (activeRequests >= MAX_CONCURRENT_REQUESTS || requestQueue.length === 0) {    
-    return; // Max concurrent requests reached or queue is empty  
-  }
-  
-  const queueItem = requestQueue.shift()!; // Dequeue the next item
-  activeRequests++;
-  
-  const { ip, port, request, resolve, reject, retries, backoffDelay } = queueItem;
-
-  console.log(`[processQueue] Processing request, queue size ${requestQueue.length}`);
-
-  const executeRequest = () => {
-    const client = TcpSocket.createConnection({host: ip, port}, () => {
-      console.log(
-        `[sendModbusRequest] Raw Request: ${request.toString('hex')}`,
-      );
-
-      //write data to socket
-      client.write(
-        new Uint8Array(request.buffer, request.byteOffset, request.byteLength),
-      );
-      console.log(`[sendModbusRequest] Data written to socket: ${request.toString('hex')}`);
-    });
-
-    client.on('error', error => {
-      console.error(`[sendModbusRequest on error] ${error.message || error}`);
-      handleError(queueItem, client, new Error(`Connection error: ${error.message || error}`));
-    });
-
-    client.on('close', () => {
-      console.log(`[sendModbusRequest on close]`);
-    });
-
-    handleData(queueItem, client);
-  };
-
-  executeRequest();
-};
-
-const handleError = (queueItem: ModbusRequestQueueItem, client: TcpSocket.Socket, error: Error) => {
-  if (queueItem.retries < MAX_RETRIES) {
-    queueItem.retries++;
-    queueItem.backoffDelay *= 2; // Exponential backoff
-    console.log(`[handleError] Retrying request in ${queueItem.backoffDelay}ms, retry count ${queueItem.retries}`);
-    setTimeout(() => {
-      client.destroy();
-      processQueue();
-    }, queueItem.backoffDelay);
-  } else {
-    console.error(`[handleError] Max retries reached for request`);
-    cleanup(queueItem, client, error);
-  }
-};
-
-const handleData = (queueItem: ModbusRequestQueueItem, client: TcpSocket.Socket) => {
-  const { resolve, reject } = queueItem;
-  let requestTimeout: NodeJS.Timeout | null = null;
-    });
-
-    let responseBuffer = Buffer.alloc(0);
-    let requestTimeout: NodeJS.Timeout | null = null;
-
-    const cleanup = (error?: Error) => {
-      if (requestTimeout) {
-        clearTimeout(requestTimeout);
-        requestTimeout = null;
-      }
-
-      console.log(`[cleanup] Cleaning socket`);
-      if (!client.destroyed) {
-        client.destroy();
-      }
-      if (error) {
-        console.error(`[sendModbusRequest Error] ${error.message || error}`);
-        reject(error); // Reject the promise on error
-      }
-    };
-    
-    const cleanup = (queueItem:ModbusRequestQueueItem, client: TcpSocket.Socket, error?: Error) => {
-      activeRequests--; // Decrement active requests
-
-      requestTimeout = setTimeout(() => {
-        cleanup();
-        reject(new Error('Modbus request timed out'));
-      }, REQUEST_TIMEOUT);
-
-      const dataHandler = (data: Buffer) => {
-        responseBuffer = Buffer.concat([responseBuffer, data]);
-
-        if (responseBuffer.length > MAX_RESPONSE_SIZE) {
-          cleanup();
-          reject(new Error('Response too large'));
-          return;
-        }
-
-        if (responseBuffer.length >= 6) {
-          const expectedLengthMBAP = responseBuffer.readUInt16BE(4);
-          const totalExpectedLength = 6 + expectedLengthMBAP;
-
-        if (responseBuffer.length >= totalExpectedLength) {
-          // Check for Modbus Exception Response
-          if (responseBuffer.length >= 8 && responseBuffer[7] & 0x80) {
-            const functionCode = responseBuffer[7] & 0x7f;
-            const exceptionCode = responseBuffer[8];
-            console.error(
-              `[sendModbusRequest] Modbus Exception ${exceptionCode} for function ${functionCode}`,
-            );
-            cleanup(queueItem, client,
-              new Error(
-                `Modbus Exception ${exceptionCode} for function ${functionCode}`,
-              ),
-            );
-          } else {
-            // Success!
-            cleanup(); // Clear timeout, close client
-            console.log(`[sendModbusRequest] Request resolved successfully`);
-            resolve(responseBuffer); // Resolve the promise with the data
-          }
-        }
-        // Else: Wait for more data or timeout
-      }
-    });
-    }
-
-    client.on('close', () => {
-      console.log(`[sendModbusRequest] Closed`);
-      processQueue();
-    });
-  }
-
-
-
-// --- General Functions ---
-
-/**
- * Turn ON/OFF lamp using UV_On_Off_Command (Coil 9 -> 0-based 8)
- * Uses async/await and returns a Promise.
- */
+export const cleanupModbusConnections = () => {
+  ModbusConnectionManager.getInstance().closeAllConnections();
+}; /// --- UV Lamp Functions ---
 export const toggleLamp = async (
   ip: string,
   port: number,
@@ -299,7 +291,6 @@ export const toggleLamp = async (
     `[toggleLamp] Sending command to turn ${value ? 'ON' : 'OFF'}...`,
   );
 
-
   try {
     console.log(
       `[toggleLamp] Sending Main Request: ${mainRequest.toString('hex')}`,
@@ -310,27 +301,35 @@ export const toggleLamp = async (
     );
 
     // Check the function code
-    if (!(mainResponse && mainResponse.length >= 12 && mainResponse[7] === functionCodeCoil))
-    {
-      throw new Error(
-        `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
-          'hex',
-        )}`,
-      );
+    if (
+      !(
+        mainResponse &&
+        mainResponse.length >= 12 &&
+        mainResponse[7] === functionCodeCoil
+      )
+    ) {
+      // throw new Error(
+      //   `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
+      //     'hex',
+      //   )}`,
+      // );
     }
 
-     //Check the value of the response based on the value given
-     if (value){
-      if (mainResponse.readUInt16BE(10) != 0xff00)
-      {
-        throw new Error(`Unexpected response for toggleLamp main request: ${mainResponse?.toString('hex')}`);
+    //Check the value of the response based on the value given
+    if (value) {
+      if (mainResponse.readUInt16BE(10) != 0xff00) {
+        // throw new Error(
+        //   `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
+        //     'hex',
+        //   )}`,
+        // );
       }
-    } else if (mainResponse.readUInt16BE(10) != 0x0000){
-      throw new Error(
-        `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
-          'hex',
-        )}`,
-      );
+    } else if (mainResponse.readUInt16BE(10) != 0x0000) {
+      // throw new Error(
+      //   `Unexpected response for toggleLamp main request: ${mainResponse?.toString(
+      //     'hex',
+      //   )}`,
+      // );
     }
 
     // Validate power status response
@@ -342,14 +341,10 @@ export const toggleLamp = async (
     );
   } catch (error: any) {
     console.error(`[toggleLamp] Error during send/receive: ${error.message}`);
-    throw error; // Reject the promise
+    // throw error; // Reject the promise
   }
 };
 
-/**
- * Read current power status (Discrete 21 -> 0-based 20)
- * Returns true if ON, false if OFF, null on error.
- */
 export const readPowerStatus = async (
   ip: string,
   port: number,
@@ -466,7 +461,7 @@ export const resetLampHours = async (
   const address = addressMap[lampIndex];
   if (address === undefined) {
     setStatus(`Error: Invalid lamp index ${lampIndex} for reset.`);
-    throw new Error(`Invalid lamp index ${lampIndex} for reset.`);
+    // throw new Error(`Invalid lamp index ${lampIndex} for reset.`);
   }
 
   const writeValueOn = 0xff00; // Value for ON
@@ -503,7 +498,7 @@ export const resetLampHours = async (
     if (setStatus) {
       setStatus(errorMsg);
     }
-    throw error;
+    // throw error;
   }
 };
 
@@ -524,7 +519,7 @@ export const readLampHours = async (
   const startAddressCurrent = addressMapCurrent[lampIndex];
 
   if (startAddressCurrent === undefined) {
-    throw new Error(`Invalid lamp index ${lampIndex} for reading hours.`);
+    // throw new Error(`Invalid lamp index ${lampIndex} for reading hours.`);
   }
 
   let currentHours = 0;
@@ -539,6 +534,7 @@ export const readLampHours = async (
       startAddressCurrent,
       quantityCurrent,
     );
+
     console.log(
       `[readLampHours ${lampIndex}] Reading Current (FC04) @ ${startAddressCurrent}`,
     );
@@ -555,17 +551,17 @@ export const readLampHours = async (
         `[readLampHours ${lampIndex}] Current Hours Raw (Float): ${currentHours}`,
       );
     } else {
-      throw new Error(
-        `Invalid response for readLampHours (Current): ${responseCurrent?.toString(
-          'hex',
-        )}`,
-      );
+      // throw new Error(
+      //   `Invalid response for readLampHours (Current): ${responseCurrent?.toString(
+      //     'hex',
+      //   )}`,
+      // );
     }
   } catch (error: any) {
     console.error(
       `[readLampHours ${lampIndex}] Error reading CURRENT hours: ${error.message}`,
     );
-    throw error; // Rethrow the error to indicate failure
+    // throw error; // Rethrow the error to indicate failure
   }
 
   // --- Return Combined Result ---
@@ -608,11 +604,11 @@ export const readLifeHoursSetpoint = async (
       console.log(`[readLifeHoursSetpoint] Decoded Value (Float): ${value}`);
       return value;
     } else {
-      throw new Error(
-        `Invalid response for readLifeHoursSetpoint (Float): ${response?.toString(
-          'hex',
-        )}`,
-      );
+      // throw new Error(
+      //   `Invalid response for readLifeHoursSetpoint (Float): ${response?.toString(
+      //     'hex',
+      //   )}`,
+      // );
     }
   } catch (error: any) {
     if (error.message.includes('Modbus Exception 4')) {
@@ -621,7 +617,7 @@ export const readLifeHoursSetpoint = async (
       );
       return null; // Return null if the setpoint is not set
     }
-    throw error; // Re-throw other errors
+    // throw error; // Re-throw other errors
   }
 };
 
@@ -674,7 +670,7 @@ export const setLampMaxHours = (
       const errorMsg = `Error setting Lamp Max Hours: ${error.message}`;
       setStatus(errorMsg);
       console.error(`[setLampMaxHours] ${errorMsg}`, error);
-      throw error;
+      // throw error;
     });
 };
 
@@ -714,11 +710,11 @@ export const readCleaningHoursSetpoint = async (
       console.log(`[readCleaningHoursSetpoint] Decoded Float Value: ${value}`);
       return value;
     } else {
-      throw new Error(
-        `Invalid response for readCleaningHoursSetpoint: ${response?.toString(
-          'hex',
-        )}`,
-      );
+      // throw new Error(
+      //   `Invalid response for readCleaningHoursSetpoint: ${response?.toString(
+      //     'hex',
+      //   )}`,
+      // );
     }
   } catch (error: any) {
     if (error.message.includes('Modbus Exception 4')) {
@@ -727,7 +723,7 @@ export const readCleaningHoursSetpoint = async (
       );
       return null; // Return null if the setpoint is not set
     }
-    throw error; // Re-throw other errors
+    // throw error; // Re-throw other errors
   }
 };
 
@@ -782,10 +778,9 @@ export const setCleaningHoursSetpoint = (
       const errorMsg = `Error setting Cleaning Hours Setpoint: ${error.message}`;
 
       console.error(`[setCleaningHoursSetpoint] ${errorMsg}`, error);
-      throw error;
+      // throw error;
     });
 };
-
 /**
  * Reads the current cleaning run hours for a SINGLE lamp.
  */
@@ -799,7 +794,7 @@ export const readSingleLampCleaningRunHours = async (
   const startAddress = addressMap[1];
 
   if (startAddress === undefined) {
-    throw new Error(`Invalid lamp index provided for reading cleaning hours.`);
+    // throw new Error(`Invalid lamp index provided for reading cleaning hours.`);
   }
 
   let cleaningHours = 0;
@@ -830,17 +825,17 @@ export const readSingleLampCleaningRunHours = async (
         `[readSingleLampCleaningRunHours 1] Cleaning Hours Raw (Float): ${cleaningHours}`,
       );
     } else {
-      throw new Error(
-        `Invalid response for readSingleLampCleaningRunHours: ${response?.toString(
-          'hex',
-        )}`,
-      );
+      // throw new Error(
+      //   `Invalid response for readSingleLampCleaningRunHours: ${response?.toString(
+      //     'hex',
+      //   )}`,
+      // );
     }
   } catch (error: any) {
     console.error(
       `[readSingleLampCleaningRunHours 1] Error reading cleaning hours: ${error.message}`,
     );
-    throw error; // Rethrow the error to indicate failure
+    // throw error; // Rethrow the error to indicate failure
   }
 
   return cleaningHours;
@@ -894,9 +889,9 @@ export const resetCleaningHours = async (
           dataOn.readUInt16BE(8) === address
         )
       ) {
-        throw new Error(
-          `Unexpected response during ON write: ${dataOn?.toString('hex')}`,
-        );
+        // throw new Error(
+        //   `Unexpected response during ON write: ${dataOn?.toString('hex')}`,
+        // );
       }
       setStatus(
         `Lamp ${lampNum} Clean Hours Reset ON command sent. Waiting ${delayMs}ms...`,
@@ -919,9 +914,9 @@ export const resetCleaningHours = async (
           dataOff.readUInt16BE(8) === address
         )
       ) {
-        throw new Error(
-          `Unexpected response during OFF write: ${dataOff?.toString('hex')}`,
-        );
+        // throw new Error(
+        //   `Unexpected response during OFF write: ${dataOff?.toString('hex')}`,
+        // );
       }
       setStatus(`Lamp ${lampNum} Clean Hours Reset OFF command sent.`);
     } catch (error: any) {
@@ -941,9 +936,9 @@ export const resetCleaningHours = async (
   }
 
   if (errorCount > 0) {
-    throw new Error(
-      `Finished resetting cleaning hours with ${errorCount} error(s).`,
-    );
+    // throw new Error(
+    //   `Finished resetting cleaning hours with ${errorCount} error(s).`,
+    // );
   }
   setStatus('All cleaning hours reset toggle sequences sent successfully.');
 };
@@ -994,31 +989,51 @@ const readPressureButton = (
   setStatus: (msg: string) => void,
   callback: (isOk: boolean | null) => void,
 ) => {
-  const address = 19;
-  const quantity = 1;
+  const address = 19; // Discrete 19 (matches SENSOR_ADDRESSES["LIMIT_SWITCH"][0])
+  const quantity = 1; // Matches SENSOR_ADDRESSES["LIMIT_SWITCH"][1]
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x02, address, quantity);
+
+  console.log(`[readPressureButton] Request: ${request.toString('hex')}`);
   setStatus('Reading Pressure Button Status...');
+
   sendModbusRequest(ip, port, request)
     .then(data => {
-      if (data && data.length >= 10 && data[8] === 1) {
-        const statusBit = data[9] & 0x01;
-        const isOk = statusBit === 1;
-        setStatus(
-          `Pressure Button Status: ${
-            isOk ? 'OK' : 'Pressure Issue (Trigger Door Icon)'
-          }`,
-        );
-        callback(isOk);
-      } else {
-        setStatus(
-          `Error: Invalid response for read Pressure Button: ${data?.toString(
-            'hex',
-          )}`,
-        );
+      if (!data || data.length < 10) {
+        setStatus('Error: Invalid response length');
+        callback(null);
+        return;
       }
+
+      // Check for Modbus exception
+      if (data[7] & 0x80) {
+        const exceptionCode = data[8];
+        setStatus(`Modbus Exception ${exceptionCode} reading pressure button`);
+        callback(null);
+        return;
+      }
+
+      if (data[8] !== 1) {
+        // Expecting 1 byte of data
+        setStatus(`Error: Unexpected byte count ${data[8]}`);
+        callback(null);
+        return;
+      }
+
+      const statusBit = data[9] & 0x01;
+      const isOk = statusBit === 1;
+
+      console.log(
+        `[readPressureButton] Response: ${data.toString('hex')}, Status: ${
+          isOk ? 'OK' : 'Pressed'
+        }`,
+      );
+      setStatus(`Pressure Button Status: ${isOk ? 'OK' : 'Pressed'}`);
+      callback(isOk);
     })
     .catch(error => {
-      setStatus(`Error reading Push Button status: ${error.message}`);
+      console.error(`[readPressureButton] Error: ${error.message}`);
+      setStatus(`Error: ${error.message}`);
+      callback(null);
     });
 };
 /**
@@ -1148,11 +1163,11 @@ export const readLampCleanStatus = async (
     );
     return needsCleaning;
   } else {
-    throw new Error(
-      `Invalid response for readLampCleanStatus ${lampIndex}: ${response?.toString(
-        'hex',
-      )}`,
-    );
+    // throw new Error(
+    //   `Invalid response for readLampCleanStatus ${lampIndex}: ${response?.toString(
+    //     'hex',
+    //   )}`,
+    // );
   }
 };
 
@@ -1173,7 +1188,7 @@ export const readLampLifeStatus = async (
   const startAddress = addressMap[lampIndex];
 
   if (startAddress === undefined) {
-    throw new Error(`Invalid lamp index ${lampIndex} for reading life status.`);
+    // throw new Error(`Invalid lamp index ${lampIndex} for reading life status.`);
   }
 
   const quantity = 1; // Read 1 register (assuming 16-bit)
@@ -1199,11 +1214,11 @@ export const readLampLifeStatus = async (
     );
     return value;
   } else {
-    throw new Error(
-      `Invalid response for readLampLifeStatus Lamp ${lampIndex}: ${response?.toString(
-        'hex',
-      )}`,
-    );
+    // throw new Error(
+    //   `Invalid response for readLampLifeStatus Lamp ${lampIndex}: ${response?.toString(
+    //     'hex',
+    //   )}`,
+    // );
   }
 };
 
@@ -1224,9 +1239,9 @@ export const readSingleCoilWorkingHours = async (
   const startAddress = addressMap[coilIndex];
 
   if (startAddress === undefined) {
-    throw new Error(
-      `Invalid coil index ${coilIndex} for reading working hours.`,
-    );
+    // throw new Error(
+    //   `Invalid coil index ${coilIndex} for reading working hours.`,
+    // );
   }
 
   const quantity = 1; // Read 1 coil
@@ -1252,11 +1267,11 @@ export const readSingleCoilWorkingHours = async (
     );
     return value;
   } else {
-    throw new Error(
-      `Invalid response for readSingleCoilWorkingHours Coil ${coilIndex}: ${response?.toString(
-        'hex',
-      )}`,
-    );
+    // throw new Error(
+    //   `Invalid response for readSingleCoilWorkingHours Coil ${coilIndex}: ${response?.toString(
+    //     'hex',
+    //   )}`,
+    // );
   }
 };
 
@@ -1277,9 +1292,9 @@ export const readSingleCoilCleaningHours = async (
   const startAddress = addressMap[coilIndex];
 
   if (startAddress === undefined) {
-    throw new Error(
-      `Invalid coil index ${coilIndex} for reading cleaning hours.`,
-    );
+    // throw new Error(
+    //   `Invalid coil index ${coilIndex} for reading cleaning hours.`,
+    // );
   }
 
   const quantity = 1; // Read 1 coil
@@ -1305,29 +1320,13 @@ export const readSingleCoilCleaningHours = async (
     );
     return value;
   } else {
-    throw new Error(
-      `Invalid response for readSingleCoilCleaningHours Coil ${coilIndex}: ${response?.toString(
-        'hex',
-      )}`,
-    );
+    // throw new Error(
+    //   `Invalid response for readSingleCoilCleaningHours Coil ${coilIndex}: ${response?.toString(
+    //     'hex',
+    //   )}`,
+    // );
   }
 };
 
 // Correct final export block
 export {readDPS, readPressureButton, readLampsOnline, readCurrentAmps};
-
-// --- Cleanup ---
-export const cleanupAllConnections = () => {
-  TcpConnectionManager.getInstance().closeAllConnections();
-};
-
-// --- Memory Monitoring ---
-// if (process.env.NODE_ENV === 'development') {
-//   setInterval(() => {
-//     const memoryUsage = process.memoryUsage();
-//     console.log(`Memory usage:
-//       RSS: ${Math.round(memoryUsage.rss / 1024 / 1024)}MB
-//       HeapTotal: ${Math.round(memoryUsage.heapTotal / 1024 / 1024)}MB
-//       HeapUsed: ${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB`);
-//   }, 5000);
-// }

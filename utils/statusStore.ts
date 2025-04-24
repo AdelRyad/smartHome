@@ -101,9 +101,30 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
     for (const section of sections) {
       if (!section.ip || !section.id) continue;
 
+      // Default values for status objects to prevent undefined errors later
+      let dpsStatus: SectionDetailedStatus = {
+        status: 'good',
+        message: 'Checking DPS...',
+        details: [],
+      };
+      let pressureButtonStatus: SectionDetailedStatus = {
+        status: 'good',
+        message: 'Checking button...',
+        details: [],
+      };
+      let lamps: Record<number, SectionDetailedStatus> = {};
+      let cleaningStatus: SectionDetailedStatus = {
+        status: 'good',
+        message: 'Checking cleaning...',
+        details: [],
+      };
+      let doorStatus: SectionDetailedStatus = {
+        status: 'good',
+        message: 'Door is secure.',
+        details: [],
+      }; // Assuming door is always present
+
       // PRESSURE BUTTON STATUS
-      let pressureButton: StatusLevel = 'good';
-      let pressureButtonDetail: string[] = [];
       try {
         const pushButtonOk = await new Promise<boolean | null>(
           (resolve, reject) => {
@@ -115,7 +136,7 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
               section.ip,
               502,
               (msg: string) => {
-                pressureButtonDetail.push(msg);
+                pressureButtonStatus.details?.push(msg);
               },
               isOk => {
                 clearTimeout(timeout);
@@ -126,32 +147,33 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
         );
 
         console.log(`Section ${section.id} pushButtonOk:`, pushButtonOk);
-
-        // Corrected logic: if button is OK (true), status is good
-        // If button is pressed/issue (false), status is error
-        // If null (read failed), status is error
-        pressureButton = pushButtonOk === true ? 'good' : 'error';
-
-        if (pressureButton === 'good') {
-          pressureButtonDetail = ['Pressure button is normal.'];
-        } else {
-          pressureButtonDetail = ['Pressure button issue detected.'];
-        }
+        const status = pushButtonOk === true ? 'good' : 'error';
+        pressureButtonStatus = {
+          status: status,
+          message:
+            status === 'good'
+              ? 'Pressure button is normal.'
+              : 'Pressure button issue detected.',
+          details:
+            status === 'good'
+              ? ['Pressure button is normal.']
+              : ['Pressure button issue detected.'],
+        };
       } catch (e: any) {
         console.error(
           `Error reading pressure button for section ${section.id}:`,
           e,
         );
-        pressureButton = 'error';
-        pressureButtonDetail = [
-          e?.message || 'Failed to read pressure button status.',
-        ];
+        pressureButtonStatus = {
+          status: 'error',
+          message: 'Failed to read pressure button status.',
+          details: [e?.message || 'Failed to read pressure button status.'],
+        };
       }
 
       // DPS STATUS
-      let dps: StatusLevel = 'good';
-      let dpsDetail: string[] = [];
       try {
+        let dpsDetail: string[] = [];
         const dpsOk = await new Promise<boolean | null>(resolve => {
           readDPS(
             section.ip,
@@ -163,24 +185,31 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
           );
         });
 
-        // Important fix: Explicitly handle null and false cases
+        let status: StatusLevel;
+        let message: string;
         if (dpsOk === false) {
-          dps = 'error';
-          if (!dpsDetail.length) dpsDetail = ['DPS pressure issue detected.'];
+          status = 'error';
+          message = 'DPS pressure issue detected.';
+          if (!dpsDetail.length) dpsDetail = [message];
         } else if (dpsOk === null) {
-          dps = 'error';
-          if (!dpsDetail.length) dpsDetail = ['Failed to read DPS status.'];
+          status = 'error';
+          message = 'Failed to read DPS status.';
+          if (!dpsDetail.length) dpsDetail = [message];
         } else {
-          dps = 'good';
-          if (!dpsDetail.length) dpsDetail = ['DPS pressure is normal.'];
+          status = 'good';
+          message = 'DPS pressure is normal.';
+          if (!dpsDetail.length) dpsDetail = [message];
         }
+        dpsStatus = {status, message, details: dpsDetail};
       } catch (e: any) {
-        dps = 'error';
-        dpsDetail = [e?.message || 'DPS error.'];
+        dpsStatus = {
+          status: 'error',
+          message: 'DPS error.',
+          details: [e?.message || 'DPS error.'],
+        };
       }
 
       // LAMP STATUS
-      const lamps: Record<number, SectionDetailedStatus> = {};
       let lampOverallStatus: StatusLevel = 'good';
       let lampsOnlineCount: number | null = null;
 
@@ -236,7 +265,7 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
         // If reading lamps online failed but we have some lamps working
         if (
           lampsOnlineCount === null &&
-          Object.values(lamps).some(l => l.status === 'good')
+          Object.values(lamps).some(l => l?.status === 'good')
         ) {
           // We know at least some lamps are working, but not sure about others
           for (let lampId = 1; lampId <= 4; lampId++) {
@@ -252,6 +281,7 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
       } catch (e: any) {
         // Existing error handling
         for (let lampId = 1; lampId <= 4; lampId++) {
+          // Initialize even on error to prevent undefined access
           lamps[lampId] = {
             status: 'error' as StatusLevel,
             message: e?.message || 'Lamp error.',
@@ -265,13 +295,13 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
         lampOverallStatus = 'error';
         // Add a special entry to indicate missing lamps
         lamps[0] = {
+          // Use index 0 for this special case
           status: 'error',
           message: `Only ${lampsOnlineCount} of 4 lamps detected`,
         };
       }
 
       // CLEANING STATUS
-      let cleaning: StatusLevel = 'good';
       let cleaningDetail: string = 'Cleaning status unknown.';
       try {
         const setpoint = await readCleaningHoursSetpoint(section.ip, 502);
@@ -279,62 +309,50 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
         const remaining =
           setpoint !== null && runHours !== null ? setpoint - runHours : null;
 
-        cleaning = getCleaningStatus(runHours, setpoint);
+        const status = getCleaningStatus(runHours, setpoint);
 
         const percentUsed =
           setpoint && remaining !== null
-            ? Math.round((remaining / setpoint) * 100)
+            ? Math.round(((setpoint - remaining) / setpoint) * 100) // Calculate used percentage
             : null;
 
-        if (cleaning === 'error') {
-          cleaningDetail = `Cleaning overdue (${percentUsed}% of limit used)`;
-        } else if (cleaning === 'warning') {
-          cleaningDetail = `Cleaning needed soon (${percentUsed}% of limit used)`;
+        if (status === 'error') {
+          cleaningDetail = `Cleaning overdue (${
+            percentUsed ?? 'N/A'
+          }% of limit used)`;
+        } else if (status === 'warning') {
+          cleaningDetail = `Cleaning needed soon (${
+            percentUsed ?? 'N/A'
+          }% of limit used)`;
         } else if (remaining !== null && setpoint !== null) {
           cleaningDetail = `${remaining} hours remaining until cleaning needed`;
-        } else {
         }
-      } catch (e: any) {
-        cleaning = 'error';
-        cleaningDetail = e?.message || 'Failed to read cleaning status.';
-      }
 
-      // Door Status - placeholder for future implementation
-      const door: SectionDetailedStatus = {
-        status: 'good',
-        message: 'Door is secure.',
-      };
-
-      // Assign all statuses to this section
-      statusBySection[section.id] = {
-        dps: {
-          status: dps,
+        cleaningStatus = {
+          status: status,
           message:
-            dps === 'good'
-              ? 'DPS pressure is normal.'
-              : 'DPS pressure issue detected.',
-          details: dpsDetail,
-        },
-        lamps,
-        cleaning: {
-          status: cleaning,
-          message:
-            cleaning === 'good'
+            status === 'good'
               ? 'Cleaning hours are healthy.'
-              : cleaning === 'warning'
+              : status === 'warning'
               ? 'Cleaning hours below 10%.'
               : 'Cleaning hours exceeded: maintenance required.',
           details: [cleaningDetail],
-        },
-        pressureButton: {
-          status: pressureButton,
-          message:
-            pressureButton === 'good'
-              ? 'Pressure button is normal.'
-              : 'Pressure button issue detected.',
-          details: pressureButtonDetail,
-        },
-        door,
+        };
+      } catch (e: any) {
+        cleaningStatus = {
+          status: 'error',
+          message: 'Failed to read cleaning status.',
+          details: [e?.message || 'Failed to read cleaning status.'],
+        };
+      }
+
+      // Assign all statuses to this section
+      statusBySection[section.id] = {
+        dps: dpsStatus,
+        lamps,
+        cleaning: cleaningStatus,
+        pressureButton: pressureButtonStatus,
+        door: doorStatus, // Ensure door always has a default value
       };
     }
 
@@ -342,50 +360,51 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
     const aggregatedStatus = {
       dps: {
         errorCount: Object.values(statusBySection).filter(
-          s => s.dps.status === 'error',
+          s => s.dps?.status === 'error', // Use optional chaining
         ).length,
         warningCount: Object.values(statusBySection).filter(
-          s => s.dps.status === 'warning',
+          s => s.dps?.status === 'warning', // Use optional chaining
         ).length,
       },
       lamp: {
         // Count sections with at least one error lamp as 1 error
-        errorCount: Object.values(statusBySection).filter(section =>
-          Object.values(section.lamps).some(lamp => lamp.status === 'error'),
+        errorCount: Object.values(statusBySection).filter(
+          section =>
+            Object.values(section.lamps).some(lamp => lamp?.status === 'error'), // Use optional chaining
         ).length,
         // Count sections with warnings (but no errors) as 1 warning
         warningCount: Object.values(statusBySection).filter(
           section =>
             !Object.values(section.lamps).some(
-              lamp => lamp.status === 'error',
+              lamp => lamp?.status === 'error', // Use optional chaining
             ) &&
             Object.values(section.lamps).some(
-              lamp => lamp.status === 'warning',
+              lamp => lamp?.status === 'warning', // Use optional chaining
             ),
         ).length,
       },
       cleaning: {
         errorCount: Object.values(statusBySection).filter(
-          s => s.cleaning.status === 'error',
+          s => s.cleaning?.status === 'error', // Use optional chaining
         ).length,
         warningCount: Object.values(statusBySection).filter(
-          s => s.cleaning.status === 'warning',
+          s => s.cleaning?.status === 'warning', // Use optional chaining
         ).length,
       },
       pressureButton: {
         errorCount: Object.values(statusBySection).filter(
-          s => s.pressureButton?.status === 'error',
+          s => s.pressureButton?.status === 'error', // Use optional chaining
         ).length,
         warningCount: Object.values(statusBySection).filter(
-          s => s.pressureButton?.status === 'warning',
+          s => s.pressureButton?.status === 'warning', // Use optional chaining
         ).length,
       },
       door: {
         errorCount: Object.values(statusBySection).filter(
-          s => s.door?.status === 'error',
+          s => s.door?.status === 'error', // Use optional chaining
         ).length,
         warningCount: Object.values(statusBySection).filter(
-          s => s.door?.status === 'warning',
+          s => s.door?.status === 'warning', // Use optional chaining
         ).length,
       },
     };
@@ -405,11 +424,16 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
     const {statusBySection, sectionNames} = get();
     const {currentSectionId} = useCurrentSectionStore.getState(); // Get current section ID from the other store
     const result = [];
+    const defaultStatus: SectionDetailedStatus = {
+      status: 'good',
+      message: 'Status unavailable',
+    };
 
-    // If there's a current section ID, only return status for that section
+    // --- Handling Current Section ---
     if (currentSectionId !== null) {
-      const status = statusBySection[currentSectionId];
-      if (!status) return []; // Section not found
+      const section = statusBySection[currentSectionId];
+      // If section data or specific status is missing, return empty or default message
+      if (!section) return [];
 
       const sectionName =
         sectionNames[currentSectionId] || `Section ${currentSectionId}`;
@@ -417,19 +441,21 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
       switch (statusType) {
         case 'dps_pressure':
         case 'dps':
-          // Always include the status regardless of whether it's good/warning/error
+          // Safely access status, provide default if undefined
+          const dps = section.dps || defaultStatus;
           result.push({
             sectionId: currentSectionId,
             sectionName,
-            status: status.dps.status as StatusLevel,
-            message: status.dps.details?.[0] || status.dps.message,
+            status: dps.status as StatusLevel,
+            message: dps.details?.[0] || dps.message,
           });
           break;
 
         case 'lamp':
           // Check for the special "missing lamps" message first
-          const missingLampsEntry = status.lamps[0];
-          if (missingLampsEntry && missingLampsEntry.status === 'error') {
+          const missingLampsEntry = section.lamps?.[0]; // Use optional chaining
+          if (missingLampsEntry?.status === 'error') {
+            // Use optional chaining
             result.push({
               sectionId: currentSectionId,
               sectionName,
@@ -438,19 +464,18 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
             });
           }
 
-          // Check individual lamp statuses
-          const allLamps = Object.entries(status.lamps).filter(
+          // Check individual lamp statuses safely
+          const allLamps = Object.entries(section.lamps || {}).filter(
+            // Default to empty object if lamps undefined
             ([id]) => id !== '0',
-          ); // Exclude special entry
-
-          // Group lamps by status
-          const errorLamps = allLamps.filter(([_, s]) => s.status === 'error');
-          const warningLamps = allLamps.filter(
-            ([_, s]) => s.status === 'warning',
           );
-          const goodLamps = allLamps.filter(([_, s]) => s.status === 'good');
 
-          // Always show at least one status entry, prioritizing most severe status
+          const errorLamps = allLamps.filter(([_, s]) => s?.status === 'error'); // Use optional chaining
+          const warningLamps = allLamps.filter(
+            ([_, s]) => s?.status === 'warning', // Use optional chaining
+          );
+          const goodLamps = allLamps.filter(([_, s]) => s?.status === 'good'); // Use optional chaining
+
           if (errorLamps.length > 0) {
             result.push({
               sectionId: currentSectionId,
@@ -459,7 +484,9 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
               message:
                 errorLamps.length > 1
                   ? `${errorLamps.length} lamps with critical issues`
-                  : `Lamp ${errorLamps[0][0]}: ${errorLamps[0][1].message}`,
+                  : `Lamp ${errorLamps[0][0]}: ${
+                      errorLamps[0][1]?.message || 'Error details missing'
+                    }`, // Optional chaining on message
             });
           } else if (warningLamps.length > 0) {
             result.push({
@@ -469,86 +496,97 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
               message:
                 warningLamps.length > 1
                   ? `${warningLamps.length} lamps below 30% life`
-                  : `Lamp ${warningLamps[0][0]}: ${warningLamps[0][1].message}`,
+                  : `Lamp ${warningLamps[0][0]}: ${
+                      warningLamps[0][1]?.message || 'Warning details missing'
+                    }`, // Optional chaining on message
             });
-          } else if (goodLamps.length > 0) {
+          } else if (goodLamps.length > 0 || allLamps.length === 0) {
+            // Show 'healthy' if all good or if lamps object is empty
             result.push({
               sectionId: currentSectionId,
               sectionName,
               status: 'good' as StatusLevel,
-              message: 'All lamps are healthy',
+              message:
+                allLamps.length === 0
+                  ? 'Lamp status not available'
+                  : 'All lamps are healthy',
             });
           }
           break;
 
         case 'cleaning':
-          // Always include status regardless of good/warning/error
+          const cleaning = section.cleaning || defaultStatus;
           result.push({
             sectionId: currentSectionId,
             sectionName,
-            status: status.cleaning.status,
-            message: status.cleaning.details || status.cleaning.message,
+            status: cleaning.status,
+            message: cleaning.details?.[0] || cleaning.message, // Access details safely
           });
           break;
 
         case 'pressure':
-          // Always include status regardless of good/warning/error
+          const pressureButton = section.pressureButton || defaultStatus;
           result.push({
             sectionId: currentSectionId,
             sectionName,
-            status: status.pressureButton.status,
-            message:
-              status.pressureButton.details?.[0] ||
-              status.pressureButton.message,
+            status: pressureButton.status,
+            message: pressureButton.details?.[0] || pressureButton.message, // Access details safely
           });
           break;
 
         case 'door':
-          // Always include status regardless of good/warning/error
-          if (status.door) {
-            result.push({
-              sectionId: currentSectionId,
-              sectionName,
-              status: status.door.status,
-              message: status.door.details?.[0] || status.door.message,
-            });
-          }
+          const door = section.door || defaultStatus; // Handle potentially undefined door
+          result.push({
+            sectionId: currentSectionId,
+            sectionName,
+            status: door.status,
+            message: door.details?.[0] || door.message, // Access details safely
+          });
           break;
 
         default:
-          console.warn(`Unknown status type: ${statusType}`);
+          console.warn(
+            `Unknown status type for current section: ${statusType}`,
+          );
           break;
       }
 
-      return result;
+      return result.map(item => ({
+        ...item,
+        status: item.status as StatusLevel,
+      }));
     }
 
-    // For cases when we don't have a current section ID - handle all sections
-    for (const [sectionId, status] of Object.entries(statusBySection)) {
+    // --- Handling All Sections (Global View) ---
+    for (const [sectionId, section] of Object.entries(statusBySection)) {
       const numericId = Number(sectionId);
       const sectionName = sectionNames[numericId] || `Section ${sectionId}`;
+
+      // Skip if section data is missing
+      if (!section) continue;
 
       switch (statusType) {
         case 'dps_pressure':
         case 'dps':
-          // Only include errors and warnings in the global view
+          // Check status safely
           if (
-            status.dps.status === 'warning' ||
-            status.dps.status === 'error'
+            section.dps?.status === 'warning' || // Use optional chaining
+            section.dps?.status === 'error' // Use optional chaining
           ) {
             result.push({
               sectionId: numericId,
               sectionName,
-              status: status.dps.status as StatusLevel,
-              message: status.dps.details?.[0] || status.dps.message,
+              status: section.dps.status as StatusLevel,
+              message: section.dps.details?.[0] || section.dps.message, // Access details safely
             });
           }
           break;
 
         case 'lamp':
-          // Check for the special "missing lamps" message first
-          const missingLampsEntry = status.lamps[0];
-          if (missingLampsEntry && missingLampsEntry.status === 'error') {
+          // Check for the special "missing lamps" message first safely
+          const missingLampsEntry = section.lamps?.[0]; // Optional chaining
+          if (missingLampsEntry?.status === 'error') {
+            // Optional chaining
             result.push({
               sectionId: numericId,
               sectionName,
@@ -557,22 +595,21 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
             });
           }
 
-          // Then check individual lamp statuses
-          const problemLamps = Object.entries(status.lamps)
-            .filter(([id]) => id !== '0') // Exclude our special entry
+          // Check individual lamp statuses safely
+          const problemLamps = Object.entries(section.lamps || {}) // Default to empty object
+            .filter(([id]) => id !== '0')
             .filter(
               ([_, lampStatus]) =>
-                lampStatus.status === 'warning' ||
-                lampStatus.status === 'error',
+                lampStatus?.status === 'warning' ||
+                lampStatus?.status === 'error', // Optional chaining
             );
 
           if (problemLamps.length > 0) {
-            // Group by status if multiple lamps have issues
             const errorLamps = problemLamps.filter(
-              ([_, s]) => s.status === 'error',
+              ([_, s]) => s?.status === 'error', // Optional chaining
             );
             const warningLamps = problemLamps.filter(
-              ([_, s]) => s.status === 'warning',
+              ([_, s]) => s?.status === 'warning', // Optional chaining
             );
 
             if (errorLamps.length > 0) {
@@ -601,15 +638,15 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
 
         case 'cleaning':
           if (
-            status.cleaning.status === 'warning' ||
-            status.cleaning.status === 'error'
+            section.cleaning?.status === 'warning' || // Optional chaining
+            section.cleaning?.status === 'error' // Optional chaining
           ) {
             result.push({
               sectionId: numericId,
               sectionName,
-              status: status.cleaning.status,
+              status: section.cleaning.status,
               message: `${sectionName}: ${
-                status.cleaning.details?.[0] || status.cleaning.message
+                section.cleaning.details?.[0] || section.cleaning.message // Access details safely
               }`,
             });
           }
@@ -617,16 +654,16 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
 
         case 'pressure':
           if (
-            status.pressureButton?.status === 'warning' ||
-            status.pressureButton?.status === 'error'
+            section.pressureButton?.status === 'warning' || // Optional chaining
+            section.pressureButton?.status === 'error' // Optional chaining
           ) {
             result.push({
               sectionId: numericId,
               sectionName,
-              status: status.pressureButton.status,
+              status: section.pressureButton.status,
               message: `${sectionName}: ${
-                status.pressureButton.details?.[0] ||
-                status.pressureButton.message
+                section.pressureButton.details?.[0] || // Access details safely
+                section.pressureButton.message
               }`,
             });
           }
@@ -634,22 +671,28 @@ export const useStatusStore = create<StatusStoreState>((set, get) => ({
 
         case 'door':
           if (
-            status.door?.status === 'warning' ||
-            status.door?.status === 'error'
+            section.door?.status === 'warning' || // Optional chaining
+            section.door?.status === 'error' // Optional chaining
           ) {
             result.push({
               sectionId: numericId,
               sectionName,
-              status: status.door.status,
+              status: section.door.status,
               message: `${sectionName}: ${
-                status.door.details?.[0] || status.door.message
+                section.door.details?.[0] || section.door.message // Access details safely
               }`,
             });
           }
           break;
+        default:
+          console.warn(`Unknown status type for global view: ${statusType}`);
+          break;
       }
     }
 
-    return result;
+    return result.map(item => ({
+      ...item,
+      status: item.status as StatusLevel,
+    }));
   },
 }));

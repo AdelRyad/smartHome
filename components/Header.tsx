@@ -42,24 +42,23 @@ const Header = () => {
   const currentPage = route.name;
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [password, setPassword] = useState(['', '', '', '']);
-  const {currentSectionId, setCurrentSectionId} = useCurrentSectionStore();
+  const {setCurrentSectionId} = useCurrentSectionStore();
+
+  const {getSectionStatusSummary, fetchAllStatuses} = useStatusStore();
 
   const handleKeyPress = (key: string | number) => {
     let newPassword = [...password];
 
     if (key === 'DEL') {
-      // Find the index of the last non-empty digit
       let lastFilledIndex = newPassword.length - 1;
       while (lastFilledIndex >= 0 && newPassword[lastFilledIndex] === '') {
         lastFilledIndex--;
       }
 
-      // If a non-empty digit is found, clear it
       if (lastFilledIndex >= 0) {
         newPassword[lastFilledIndex] = '';
       }
     } else {
-      // Find the first empty digit and fill it
       const firstEmptyIndex = newPassword.findIndex(p => p === '');
       if (firstEmptyIndex !== -1) {
         newPassword[firstEmptyIndex] = key.toString();
@@ -68,7 +67,6 @@ const Header = () => {
 
     setPassword(newPassword);
 
-    // Check if the password is correct
     if (newPassword.join('') === '3536') {
       if (NativeModules.KioskModule) {
         NativeModules.KioskModule.stopKioskMode();
@@ -77,163 +75,92 @@ const Header = () => {
     }
   };
 
-  const {statusBySection, fetchAllStatuses} = useStatusStore();
-
   useEffect(() => {
-    setInterval(() => {
+    const interval = setInterval(() => {
       fetchAllStatuses();
-    }, 5 * 1000); // Fetch every 5 minutes
+    }, 300000); // 5 minutes in milliseconds
+
+    return () => clearInterval(interval);
   }, [fetchAllStatuses]);
-  // Helper to get section name by id
-  const getSectionStatusCounts = (
-    sectionId: number | null,
-    statusBySection: Record<number, any>,
-  ) => {
-    if (sectionId === null) {
-      // Return global counts if no section is selected
-      return {
-        dpsErrorCount: Object.values(statusBySection).filter(
-          s => s.dps.status === 'error',
-        ).length,
-        dpsWarningCount: Object.values(statusBySection).filter(
-          s => s.dps.status === 'warning',
-        ).length,
-        pressureErrorCount: Object.values(statusBySection).filter(
-          s => s.pressureButton.status === 'error',
-        ).length,
-        pressureWarningCount: Object.values(statusBySection).filter(
-          s => s.pressureButton.status === 'warning',
-        ).length,
-        lampErrorCount: Object.values(statusBySection).filter(s =>
-          Object.values(s.lamps).some(lamp => lamp.status === 'error'),
-        ).length,
-        lampWarningCount: Object.values(statusBySection).filter(s =>
-          Object.values(s.lamps).some(lamp => lamp.status === 'warning'),
-        ).length,
-        cleaningErrorCount: Object.values(statusBySection).filter(
-          s => s.cleaning.status === 'error',
-        ).length,
-        cleaningWarningCount: Object.values(statusBySection).filter(
-          s => s.cleaning.status === 'warning',
-        ).length,
-      };
-    }
 
-    const sectionStatus = statusBySection[sectionId];
-
-    if (!sectionStatus) {
-      return {
-        dpsErrorCount: 0,
-        dpsWarningCount: 0,
-        pressureErrorCount: 0,
-        pressureWarningCount: 0,
-        lampErrorCount: 0,
-        lampWarningCount: 0,
-        cleaningErrorCount: 0,
-        cleaningWarningCount: 0,
-      };
-    }
-
-    return {
-      dpsErrorCount: sectionStatus.dps.status === 'error' ? 1 : 0,
-      dpsWarningCount: sectionStatus.dps.status === 'warning' ? 1 : 0,
-      pressureErrorCount:
-        sectionStatus.pressureButton.status === 'error' ? 1 : 0,
-      pressureWarningCount:
-        sectionStatus.pressureButton.status === 'warning' ? 1 : 0,
-      lampErrorCount: Object.values(sectionStatus.lamps).filter(
-        lamp => lamp.status === 'error',
-      ).length,
-      lampWarningCount: Object.values(sectionStatus.lamps).filter(
-        lamp => lamp.status === 'warning',
-      ).length,
-      cleaningErrorCount: sectionStatus.cleaning.status === 'error' ? 1 : 0,
-      cleaningWarningCount: sectionStatus.cleaning.status === 'warning' ? 1 : 0,
-    };
-  };
-  // Aggregate error/warning counts for each status type
-  const {
-    dpsErrorCount,
-    dpsWarningCount,
-    pressureErrorCount,
-    pressureWarningCount,
-    lampErrorCount,
-    lampWarningCount,
-    cleaningErrorCount,
-    cleaningWarningCount,
-  } = getSectionStatusCounts(currentSectionId, statusBySection);
-
-  const errorCount =
-    dpsErrorCount + pressureErrorCount + lampErrorCount + cleaningErrorCount;
-  const warningCount =
-    dpsWarningCount +
-    pressureWarningCount +
-    lampWarningCount +
-    cleaningWarningCount;
-  const elements = [
+  const [elements, setElements] = useState<
+    Array<{
+      title: string;
+      icon: any;
+      summary: any[];
+      errorCount: number;
+      warningCount: number;
+      status: 'good' | 'warning' | 'error';
+    }>
+  >([
     {
-      title: 'dps_pressure',
-      icon: FanIcon, // Replace with DPS icon if you have one
-      status:
-        dpsErrorCount > 0 ? 'error' : dpsWarningCount > 0 ? 'warning' : 'good',
-      errorCount: dpsErrorCount,
-      warningCount: dpsWarningCount,
+      title: 'dps',
+      icon: FanIcon,
+      summary: [],
+      errorCount: 0,
+      warningCount: 0,
+      status: 'good',
     },
     {
       title: 'lamp',
       icon: LampIcon,
-      status:
-        lampErrorCount > 0
-          ? 'error'
-          : lampWarningCount > 0
-          ? 'warning'
-          : 'good',
-      errorCount: lampErrorCount,
-      warningCount: lampWarningCount,
+      summary: [],
+      errorCount: 0,
+      warningCount: 0,
+      status: 'good',
     },
     {
       title: 'pressure',
-      icon: GridIcon, // Placeholder
-      status:
-        pressureErrorCount > 0
-          ? 'error'
-          : pressureWarningCount > 0
-          ? 'warning'
-          : 'good',
-      errorCount: pressureErrorCount,
-      warningCount: pressureWarningCount,
+      icon: GridIcon,
+      summary: [],
+      errorCount: 0,
+      warningCount: 0,
+      status: 'good',
     },
-    // {
-    //   title: 'door',
-    //   icon: DoorIcon, // Placeholder
-    //   status: 'good',
-    //   errorCount: 0,
-    //   warningCount: 0,
-    // },
     {
       title: 'cleaning',
       icon: CleaningIcon,
-      status:
-        cleaningErrorCount > 0
-          ? 'error'
-          : cleaningWarningCount > 0
-          ? 'warning'
-          : 'good',
-      errorCount: cleaningErrorCount,
-      warningCount: cleaningWarningCount,
+      summary: [],
+      errorCount: 0,
+      warningCount: 0,
+      status: 'good',
     },
-  ];
+  ]);
+
+  // Update elements when status changes
+  useEffect(() => {
+    const updatedElements = elements.map(item => {
+      const summary = getSectionStatusSummary(item.title) || [];
+      const errorCount = summary.filter(s => s?.status === 'error').length;
+      const warningCount = summary.filter(s => s?.status === 'warning').length;
+
+      return {
+        ...item,
+        summary,
+        errorCount,
+        warningCount,
+        status:
+          errorCount > 0
+            ? ('error' as 'error')
+            : warningCount > 0
+            ? ('warning' as 'warning')
+            : ('good' as 'good'),
+      };
+    });
+
+    setElements(updatedElements);
+  }, [elements, getSectionStatusSummary]); // Update when status store changes
+
+  const errorCount = elements.reduce((sum, item) => sum + item.errorCount, 0);
+  const warningCount = elements.reduce(
+    (sum, item) => sum + item.warningCount,
+    0,
+  );
 
   const [tooltip, setTooltip] = useState<{
     title: string;
     index: number;
     position: {x: number; y: number};
-    lampWarnings?: {
-      sectionId: string;
-      lampId: string;
-      status: string;
-      percentLeft: number;
-    }[];
   } | null>(null);
 
   const iconRefs = useRef<(View | null)[]>([]);
@@ -253,39 +180,9 @@ const Header = () => {
               title,
               index,
               position: {
-                x: pageX + width / 2 + 10, // Start at center
-                y: pageY + height - 10, // Position below icon
+                x: pageX + width / 2,
+                y: pageY + height,
               },
-              // Add lamp warnings/errors for tooltip
-              lampWarnings: Object.values(statusBySection)
-                .filter(s =>
-                  Object.values(s.lamps).some(
-                    lamp =>
-                      lamp.status === 'error' || lamp.status === 'warning',
-                  ),
-                )
-                .map(w => ({
-                  sectionId: String(
-                    Object.keys(statusBySection).find(
-                      (key: string) =>
-                        (statusBySection as Record<string, typeof w>)[key] ===
-                        w,
-                    ),
-                  ),
-                  lampId: String(
-                    Object.keys(w.lamps).find(
-                      lampId =>
-                        w.lamps[Number(lampId)].status === 'error' ||
-                        w.lamps[Number(lampId)].status === 'warning',
-                    ),
-                  ), // Extract the lamp ID with error or warning status
-                  status:
-                    Object.values(w.lamps).find(
-                      lamp =>
-                        lamp.status === 'error' || lamp.status === 'warning',
-                    )?.status || 'good', // Extract the status or default to 'good'
-                  percentLeft: 0, // Replace with a default value or remove if unnecessary
-                })),
             },
       );
     });
@@ -294,8 +191,6 @@ const Header = () => {
   const closeTooltip = () => {
     setTooltip(null);
   };
-
-  // Modified Header component tooltip section
 
   return (
     <View style={styles.header}>
@@ -391,7 +286,14 @@ const Header = () => {
                       <View
                         style={[
                           styles.statusIndicator,
-                          {backgroundColor: COLORS[item.status][500]},
+                          {
+                            backgroundColor:
+                              item.errorCount > 0
+                                ? COLORS.error[500]
+                                : item.warningCount > 0
+                                ? COLORS.warning[500]
+                                : COLORS.good[500],
+                          },
                         ]}>
                         {item.errorCount > 0 ? (
                           <Text style={styles.statusText}>
@@ -408,12 +310,20 @@ const Header = () => {
                       <item.icon
                         fill={
                           item.title !== 'pressure'
-                            ? COLORS[item.status][500]
+                            ? item.errorCount > 0
+                              ? COLORS.error[500]
+                              : item.warningCount > 0
+                              ? COLORS.warning[500]
+                              : COLORS.good[500]
                             : '#fff'
                         }
                         stroke={
                           item.title === 'pressure'
-                            ? COLORS[item.status][500]
+                            ? item.errorCount > 0
+                              ? COLORS.error[500]
+                              : item.warningCount > 0
+                              ? COLORS.warning[500]
+                              : COLORS.good[500]
                             : ''
                         }
                       />
@@ -453,7 +363,6 @@ const Header = () => {
                         : COLORS.good[500],
                   },
                 ]}>
-                {/* if at least we have one warning the background should be yellow and if all are ok the background should be green and if we have one error the background should be red */}
                 <CheckIcon fill={'#fff'} style={styles.checkIcon} />
               </TouchableOpacity>
             </View>
@@ -461,7 +370,6 @@ const Header = () => {
         </ScrollView>
       </View>
 
-      {/* Tooltip as a Modal */}
       <Modal
         visible={!!tooltip}
         transparent
@@ -475,17 +383,17 @@ const Header = () => {
                   styles.tooltipContainer,
                   {
                     top: tooltip.position.y,
-                    left: tooltip.position.x - 160, // Center the tooltip (half of width)
+                    left: tooltip.position.x - 150,
                   },
                 ]}>
                 <View style={styles.tooltipTriangle} />
                 <View style={styles.tooltipContent}>
-                  {/* Use our improved TooltipContent component */}
                   <TooltipContent
                     type={tooltip.title}
-                    statusSummary={useStatusStore
-                      .getState()
-                      .getSectionStatusSummary(tooltip.title)}
+                    statusSummary={
+                      elements.find(e => e.title === tooltip.title)?.summary ||
+                      []
+                    }
                   />
                 </View>
               </View>
@@ -496,8 +404,6 @@ const Header = () => {
     </View>
   );
 };
-
-export default Header;
 
 const styles = StyleSheet.create({
   header: {
@@ -574,6 +480,7 @@ const styles = StyleSheet.create({
   },
   statusText: {
     color: '#fff',
+    fontSize: 12,
   },
   checkIcon: {
     backgroundColor: 'transparent',
@@ -596,7 +503,6 @@ const styles = StyleSheet.create({
     height: 48,
   },
   warningButton: {
-    backgroundColor: COLORS.warning[500],
     justifyContent: 'center',
     alignItems: 'center',
     borderRadius: 12,
@@ -634,18 +540,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     width: 300,
-    alignItems: 'center',
-  },
-  tooltipText: {
-    color: '#fff',
-    fontSize: 12,
-    flex: 1, // Allow text to take up remaining space
-    marginRight: 10, // Add spacing between text and icon
-  },
-  tooltipIcon: {
-    width: 24,
-    height: 24,
-    justifyContent: 'center',
     alignItems: 'center',
   },
   otpContainer: {
@@ -690,3 +584,5 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
 });
+
+export default Header;

@@ -32,19 +32,20 @@ type RootStackParamList = {
   ContactUs: undefined;
 };
 
-// Memoized components
+type StatusLevel = 'good' | 'warning' | 'error' | 'unknown';
+
 const WarningDot = memo(({color}: {color: string}) => (
   <View style={[styles.warningDot, {backgroundColor: color}]} />
 ));
 
 const StatusIcon = memo(
-  ({status, connected}: {status: string; connected: boolean}) => {
+  ({status, connected}: {status: StatusLevel; connected: boolean}) => {
     if (!connected) {
       return <InfoIcon stroke={COLORS.gray[400]} />;
     }
 
     switch (status) {
-      case 'stable':
+      case 'good':
         return <CheckIcon2 fill={'#fff'} width={24} height={24} />;
       case 'error':
         return (
@@ -76,8 +77,25 @@ const SectionCard = memo(
     onToggleSwitch: (index: number) => void;
     onNavigate: (item: any) => void;
   }) => {
-    const status =
-      useStatusStore().statusBySection[item.id]?.dps.status || 'stable';
+    const sectionStatus = useStatusStore(
+      state => state.statusBySection[item.id],
+    );
+
+    const status = useMemo(() => {
+      if (!sectionStatus) return 'good';
+
+      const statuses: StatusLevel[] = [
+        sectionStatus.dps.status,
+        sectionStatus.pressureButton.status,
+        sectionStatus.cleaning.status,
+        ...Object.values(sectionStatus.lamps).map(l => l.status),
+      ];
+
+      if (statuses.includes('error')) return 'error';
+      if (statuses.includes('warning')) return 'warning';
+      return 'good';
+    }, [sectionStatus]);
+
     const connected = item.connected;
 
     return (
@@ -134,48 +152,29 @@ const Home = () => {
   const [allSectionsWorking, setAllSectionsWorking] = useState(false);
 
   const powerStatusStore = useSectionsPowerStatusStore();
-  const {statusBySection} = useStatusStore();
+  const {getSectionStatusSummary} = useStatusStore();
 
-  // Memoized status counts
   const {errorCount, warningCount} = useMemo(() => {
-    const dpsErrorCount = Object.values(statusBySection).filter(
-      s => s.dps.status === 'error',
-    ).length;
-    const dpsWarningCount = Object.values(statusBySection).filter(
-      s => s.dps.status === 'warning',
-    ).length;
-    const pressureErrorCount = Object.values(statusBySection).filter(
-      s => s.pressureButton.status === 'error',
-    ).length;
-    const pressureWarningCount = Object.values(statusBySection).filter(
-      s => s.pressureButton.status === 'warning',
-    ).length;
-    const lampErrorCount = Object.values(statusBySection).filter(s =>
-      Object.values(s.lamps).some(lamp => lamp.status === 'error'),
-    ).length;
-    const lampWarningCount = Object.values(statusBySection).filter(s =>
-      Object.values(s.lamps).some(lamp => lamp.status === 'warning'),
-    ).length;
-    const cleaningErrorCount = Object.values(statusBySection).filter(
-      s => s.cleaning.status === 'error',
-    ).length;
-    const cleaningWarningCount = Object.values(statusBySection).filter(
-      s => s.cleaning.status === 'warning',
-    ).length;
+    const dpsSummary = getSectionStatusSummary('dps');
+    const lampSummary = getSectionStatusSummary('lamp');
+    const pressureSummary = getSectionStatusSummary('pressure');
+    const cleaningSummary = getSectionStatusSummary('cleaning');
 
     return {
-      errorCount:
-        dpsErrorCount +
-          pressureErrorCount +
-          lampErrorCount +
-          cleaningErrorCount || 0,
-      warningCount:
-        dpsWarningCount +
-          pressureWarningCount +
-          lampWarningCount +
-          cleaningWarningCount || 0,
+      errorCount: [
+        ...dpsSummary,
+        ...lampSummary,
+        ...pressureSummary,
+        ...cleaningSummary,
+      ].filter(item => item.status === 'error').length,
+      warningCount: [
+        ...dpsSummary,
+        ...lampSummary,
+        ...pressureSummary,
+        ...cleaningSummary,
+      ].filter(item => item.status === 'warning').length,
     };
-  }, [statusBySection]);
+  }, [getSectionStatusSummary]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -200,6 +199,7 @@ const Home = () => {
         setAllSectionsWorking(allConnectedWorking);
       });
     } catch (error) {
+      console.error('Error fetching sections:', error);
     } finally {
       setLoading(false);
     }
@@ -220,7 +220,6 @@ const Home = () => {
       setLoading(true);
       const desiredState = !powerStatusStore.powerStatus[section.id];
 
-      // Optimistically update the Zustand store immediately
       powerStatusStore.setPowerStatus(section.id, desiredState);
 
       try {
@@ -237,12 +236,14 @@ const Home = () => {
               if (success) {
                 resolve();
               } else {
-                reject(new Error(`DB Update Failed`));
+                reject(new Error('DB Update Failed'));
               }
             },
           );
         });
       } catch (error: any) {
+        console.error('Error toggling switch:', error);
+        powerStatusStore.setPowerStatus(section.id, !desiredState);
       } finally {
         setLoading(false);
       }
@@ -269,9 +270,11 @@ const Home = () => {
       );
 
       modbusResults.forEach((result, index) => {
-        const sectionName = connectedSections[index].name;
-        if (result.status === 'fulfilled') {
-        } else {
+        if (result.status === 'rejected') {
+          console.error(
+            `Failed to toggle section ${connectedSections[index].id}:`,
+            result.reason,
+          );
         }
       });
 
@@ -285,6 +288,7 @@ const Home = () => {
             newStatus,
             success => {
               if (!success) {
+                console.error(`Failed to update DB for section ${section.id}`);
               }
               resolve();
             },
@@ -315,6 +319,7 @@ const Home = () => {
         });
         setCurrentSectionId(item.id);
       } else {
+        console.warn('Cannot navigate to disconnected section');
       }
     },
     [navigation, setCurrentSectionId],
@@ -388,7 +393,6 @@ const Home = () => {
   );
 };
 
-// Styles remain the same as in your original code
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -498,18 +502,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     zIndex: 10,
   },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
-    color: COLORS.gray[700],
-  },
 });
 
-const sectionCard = (status: string, connected?: boolean): ViewStyle => ({
+const sectionCard = (status: StatusLevel, connected?: boolean): ViewStyle => ({
   borderWidth: connected ? 0 : 1,
   borderColor: COLORS.gray[100],
   backgroundColor: connected
-    ? status === 'stable'
+    ? status === 'good'
       ? COLORS.good[200]
       : status === 'warning'
       ? COLORS.warning[200]
@@ -521,11 +520,11 @@ const sectionCard = (status: string, connected?: boolean): ViewStyle => ({
   padding: 24,
 });
 
-const cardIcon = (status: string, connected: boolean): ViewStyle => ({
+const cardIcon = (status: StatusLevel, connected: boolean): ViewStyle => ({
   justifyContent: 'center',
   alignItems: 'center',
   backgroundColor: connected
-    ? status === 'stable'
+    ? status === 'good'
       ? COLORS.good[500]
       : status === 'warning'
       ? COLORS.warning[500]
@@ -536,12 +535,12 @@ const cardIcon = (status: string, connected: boolean): ViewStyle => ({
   borderRadius: 1000,
 });
 
-const cardText = (status: string, connected: boolean): TextStyle => ({
+const cardText = (status: StatusLevel, connected: boolean): TextStyle => ({
   textTransform: 'capitalize',
   justifyContent: 'center',
   alignItems: 'center',
   backgroundColor: connected
-    ? status === 'stable'
+    ? status === 'good'
       ? COLORS.good[50]
       : status === 'warning'
       ? COLORS.warning[50]
@@ -549,14 +548,14 @@ const cardText = (status: string, connected: boolean): TextStyle => ({
     : COLORS.gray[100],
   borderWidth: 1,
   borderColor: connected
-    ? status === 'stable'
+    ? status === 'good'
       ? COLORS.good[200]
       : status === 'warning'
       ? COLORS.warning[200]
       : COLORS.error[200]
     : COLORS.gray[200],
   color: connected
-    ? status === 'stable'
+    ? status === 'good'
       ? COLORS.good[700]
       : status === 'warning'
       ? COLORS.warning[700]
