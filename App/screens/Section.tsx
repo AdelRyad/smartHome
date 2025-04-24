@@ -82,7 +82,7 @@ const GridItem = memo(
 
     const currentHours = hoursInfo.currentHours ?? 0;
     const maxHours = hoursInfo.maxHours ?? 0;
-    const remainingHours = (cleaningData.remaining || 0).toFixed(2);
+    const remainingHours = Math.floor(maxHours - currentHours);
 
     const progressBarHeight = useMemo(() => {
       if (!isLampActive || hoursInfo.currentHours === null) return '0%';
