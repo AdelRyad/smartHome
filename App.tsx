@@ -13,11 +13,9 @@ const Stack = createStackNavigator();
 function App() {
   useEffect(() => {
     initDatabase()
-      .then(() => {
-        console.log('Database initialized');
-      })
+      .then(() => {})
       .catch(error => {
-        console.error('Failed to initialize database:', error);
+        error('Failed to initialize database:', error);
       });
   }, []);
   return (

@@ -1,7 +1,16 @@
 import TcpSocket from 'react-native-tcp-socket';
-import {Buffer} from 'buffer'; // Make sure to import Buffer
+import {Buffer} from 'buffer';
 
-// --- Define Shared Types ---
+// --- Configuration ---
+const MODBUS_UNIT_ID = 1;
+const MAX_CONNECTIONS = 5;
+const REQUEST_TIMEOUT = 5000; // 5 seconds
+const CONNECTION_REFRESH_INTERVAL = 2 * 60 * 1000; // 2 minutes
+const REQUEST_DELAY = 250; // Delay between requests in ms
+const MAX_QUEUE_SIZE = 100;
+const MAX_RESPONSE_SIZE = 1024 * 1024; // 1MB
+
+// --- Shared Types ---
 interface LampHours {
   currentHours: number;
 }
@@ -212,21 +221,23 @@ const handleData = (queueItem: ModbusRequestQueueItem, client: TcpSocket.Socket)
     const cleanup = (queueItem:ModbusRequestQueueItem, client: TcpSocket.Socket, error?: Error) => {
       activeRequests--; // Decrement active requests
 
-    requestTimeout = setTimeout(() => {
-      cleanup(new Error('Modbus request timed out'));
-    }, 5000); // 5 second timeout
+      requestTimeout = setTimeout(() => {
+        cleanup();
+        reject(new Error('Modbus request timed out'));
+      }, REQUEST_TIMEOUT);
 
-    client.on('data', data => {
-      const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-      responseBuffer = Buffer.concat([responseBuffer, dataBuffer]);
-      console.log(
-        `[sendModbusRequest] Raw Response: ${responseBuffer.toString('hex')}`,
-      );
+      const dataHandler = (data: Buffer) => {
+        responseBuffer = Buffer.concat([responseBuffer, data]);
 
-      if (responseBuffer.length >= 6) {
-        // Minimum MBAP header length
-        const expectedLengthMBAP = responseBuffer.readUInt16BE(4);
-        const totalExpectedLength = 6 + expectedLengthMBAP; // Correct total length
+        if (responseBuffer.length > MAX_RESPONSE_SIZE) {
+          cleanup();
+          reject(new Error('Response too large'));
+          return;
+        }
+
+        if (responseBuffer.length >= 6) {
+          const expectedLengthMBAP = responseBuffer.readUInt16BE(4);
+          const totalExpectedLength = 6 + expectedLengthMBAP;
 
         if (responseBuffer.length >= totalExpectedLength) {
           // Check for Modbus Exception Response
@@ -983,51 +994,31 @@ const readPressureButton = (
   setStatus: (msg: string) => void,
   callback: (isOk: boolean | null) => void,
 ) => {
-  const address = 19; // Discrete 19 (matches SENSOR_ADDRESSES["LIMIT_SWITCH"][0])
-  const quantity = 1; // Matches SENSOR_ADDRESSES["LIMIT_SWITCH"][1]
+  const address = 19;
+  const quantity = 1;
   const request = createModbusRequest(MODBUS_UNIT_ID, 0x02, address, quantity);
-
-  console.log(`[readPressureButton] Request: ${request.toString('hex')}`);
   setStatus('Reading Pressure Button Status...');
-
   sendModbusRequest(ip, port, request)
     .then(data => {
-      if (!data || data.length < 10) {
-        setStatus('Error: Invalid response length');
-        callback(null);
-        return;
+      if (data && data.length >= 10 && data[8] === 1) {
+        const statusBit = data[9] & 0x01;
+        const isOk = statusBit === 1;
+        setStatus(
+          `Pressure Button Status: ${
+            isOk ? 'OK' : 'Pressure Issue (Trigger Door Icon)'
+          }`,
+        );
+        callback(isOk);
+      } else {
+        setStatus(
+          `Error: Invalid response for read Pressure Button: ${data?.toString(
+            'hex',
+          )}`,
+        );
       }
-
-      // Check for Modbus exception
-      if (data[7] & 0x80) {
-        const exceptionCode = data[8];
-        setStatus(`Modbus Exception ${exceptionCode} reading pressure button`);
-        callback(null);
-        return;
-      }
-
-      if (data[8] !== 1) {
-        // Expecting 1 byte of data
-        setStatus(`Error: Unexpected byte count ${data[8]}`);
-        callback(null);
-        return;
-      }
-
-      const statusBit = data[9] & 0x01;
-      const isOk = statusBit === 1;
-
-      console.log(
-        `[readPressureButton] Response: ${data.toString('hex')}, Status: ${
-          isOk ? 'OK' : 'Pressed'
-        }`,
-      );
-      setStatus(`Pressure Button Status: ${isOk ? 'OK' : 'Pressed'}`);
-      callback(isOk);
     })
     .catch(error => {
-      console.error(`[readPressureButton] Error: ${error.message}`);
-      setStatus(`Error: ${error.message}`);
-      callback(null);
+      setStatus(`Error reading Push Button status: ${error.message}`);
     });
 };
 /**
@@ -1324,3 +1315,19 @@ export const readSingleCoilCleaningHours = async (
 
 // Correct final export block
 export {readDPS, readPressureButton, readLampsOnline, readCurrentAmps};
+
+// --- Cleanup ---
+export const cleanupAllConnections = () => {
+  TcpConnectionManager.getInstance().closeAllConnections();
+};
+
+// --- Memory Monitoring ---
+// if (process.env.NODE_ENV === 'development') {
+//   setInterval(() => {
+//     const memoryUsage = process.memoryUsage();
+//     console.log(`Memory usage:
+//       RSS: ${Math.round(memoryUsage.rss / 1024 / 1024)}MB
+//       HeapTotal: ${Math.round(memoryUsage.heapTotal / 1024 / 1024)}MB
+//       HeapUsed: ${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB`);
+//   }, 5000);
+// }

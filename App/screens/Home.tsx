@@ -1,4 +1,4 @@
-import React, {useState, useEffect} from 'react';
+import React, {useState, useEffect, useCallback, useMemo, memo} from 'react';
 import {
   View,
   Text,
@@ -10,14 +10,12 @@ import {
   TouchableOpacity,
   ActivityIndicator,
 } from 'react-native';
-
 import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
 import {CheckIcon2, InfoIcon} from '../../icons';
 import CustomSwitch from '../../components/CustomSwitch';
 import {useNavigation, NavigationProp} from '@react-navigation/native';
 import {getSectionsWithStatus, updateSection} from '../../utils/db';
-
 import {toggleLamp} from '../../utils/modbus';
 import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 import {useStatusStore} from '../../utils/statusStore';
@@ -34,7 +32,89 @@ type RootStackParamList = {
   ContactUs: undefined;
 };
 
-export default function Home() {
+// Memoized components
+const WarningDot = memo(({color}: {color: string}) => (
+  <View style={[styles.warningDot, {backgroundColor: color}]} />
+));
+
+const StatusIcon = memo(
+  ({status, connected}: {status: string; connected: boolean}) => {
+    if (!connected) {
+      return <InfoIcon stroke={COLORS.gray[400]} />;
+    }
+
+    switch (status) {
+      case 'stable':
+        return <CheckIcon2 fill={'#fff'} width={24} height={24} />;
+      case 'error':
+        return (
+          <View style={styles.errorIconContainer}>
+            <View style={styles.errorIconRingLarge} />
+            <View style={styles.errorIconRingSmall} />
+            <InfoIcon stroke={COLORS.error[600]} />
+          </View>
+        );
+      default:
+        return <InfoIcon stroke={'#fff'} />;
+    }
+  },
+);
+
+const SectionCard = memo(
+  ({
+    item,
+    index,
+    loading,
+    powerStatus,
+    onToggleSwitch,
+    onNavigate,
+  }: {
+    item: any;
+    index: number;
+    loading: boolean;
+    powerStatus: boolean;
+    onToggleSwitch: (index: number) => void;
+    onNavigate: (item: any) => void;
+  }) => {
+    const status =
+      useStatusStore().statusBySection[item.id]?.dps.status || 'stable';
+    const connected = item.connected;
+
+    return (
+      <TouchableOpacity
+        style={[styles.gridItem, {flex: 1}]}
+        onPress={() => onNavigate(item)}
+        disabled={!connected || loading}>
+        <View style={sectionCard(status, connected)}>
+          <View style={styles.sectionHeader}>
+            <Text style={cardText(status, connected)}>
+              {connected ? status : 'disconnected'}
+            </Text>
+            <View style={cardIcon(status, connected)}>
+              <StatusIcon status={status} connected={connected} />
+            </View>
+          </View>
+          <View style={styles.sectionHeader}>
+            <Text
+              style={[
+                styles.sectionTitle,
+                !connected && {color: COLORS.gray[400]},
+              ]}>
+              {item.name}
+            </Text>
+            <CustomSwitch
+              value={connected ? powerStatus : false}
+              onToggle={() => onToggleSwitch(index)}
+              disabled={!connected || loading}
+            />
+          </View>
+        </View>
+      </TouchableOpacity>
+    );
+  },
+);
+
+const Home = () => {
   const navigation = useNavigation<NavigationProp<RootStackParamList>>();
   const {width, height} = useWindowDimensions();
   const isPortrait = height > width;
@@ -54,278 +134,205 @@ export default function Home() {
   const [allSectionsWorking, setAllSectionsWorking] = useState(false);
 
   const powerStatusStore = useSectionsPowerStatusStore();
+  const {statusBySection} = useStatusStore();
 
-  const logModbusStatus = (message: string) => {
-    console.log(`[Modbus Status] ${message}`);
-  };
+  // Memoized status counts
+  const {errorCount, warningCount} = useMemo(() => {
+    const dpsErrorCount = Object.values(statusBySection).filter(
+      s => s.dps.status === 'error',
+    ).length;
+    const dpsWarningCount = Object.values(statusBySection).filter(
+      s => s.dps.status === 'warning',
+    ).length;
+    const pressureErrorCount = Object.values(statusBySection).filter(
+      s => s.pressureButton.status === 'error',
+    ).length;
+    const pressureWarningCount = Object.values(statusBySection).filter(
+      s => s.pressureButton.status === 'warning',
+    ).length;
+    const lampErrorCount = Object.values(statusBySection).filter(s =>
+      Object.values(s.lamps).some(lamp => lamp.status === 'error'),
+    ).length;
+    const lampWarningCount = Object.values(statusBySection).filter(s =>
+      Object.values(s.lamps).some(lamp => lamp.status === 'warning'),
+    ).length;
+    const cleaningErrorCount = Object.values(statusBySection).filter(
+      s => s.cleaning.status === 'error',
+    ).length;
+    const cleaningWarningCount = Object.values(statusBySection).filter(
+      s => s.cleaning.status === 'warning',
+    ).length;
 
-  useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        await getSectionsWithStatus(async sectionsData => {
-          const updatedSections = sectionsData.map(section => {
-            const isConnected = !!section.ip;
-            return {
-              id: section.id!,
-              name: section.name,
-              connected: isConnected,
-              working: section.working,
-              ip: section.ip || null,
-              cleaningDays: section.cleaningDays,
-            };
-          });
-          setSections(updatedSections);
-          const connectedSections = updatedSections.filter(s => s.connected);
-          const allConnectedWorking =
-            connectedSections.length > 0 &&
-            connectedSections.every(s => s.working);
-          setAllSectionsWorking(allConnectedWorking);
-        });
-      } catch (error) {
-        console.error('Error fetching sections:', error);
-      } finally {
-        setLoading(false);
-      }
+    return {
+      errorCount:
+        dpsErrorCount +
+          pressureErrorCount +
+          lampErrorCount +
+          cleaningErrorCount || 0,
+      warningCount:
+        dpsWarningCount +
+          pressureWarningCount +
+          lampWarningCount +
+          cleaningWarningCount || 0,
     };
+  }, [statusBySection]);
 
-    fetchData();
-    const unsubscribe = navigation.addListener('focus', fetchData);
-    return unsubscribe;
-  }, [navigation]);
-
-  const handleToggleSwitch = async (index: number) => {
-    const section = sections[index];
-    if (!section.connected || !section.ip) {
-      logModbusStatus(`Section ${section.name} is not connected.`);
-      return;
-    }
+  const fetchData = useCallback(async () => {
     setLoading(true);
-    const desiredState = !powerStatusStore.powerStatus[section.id];
-    logModbusStatus(
-      `Attempting to toggle ${section.name} to ${
-        desiredState ? 'ON' : 'OFF'
-      }...`,
-    );
-
-    // Optimistically update the Zustand store immediately
-    powerStatusStore.setPowerStatus(section.id, desiredState);
-
     try {
-      await toggleLamp(section.ip!, 502, desiredState);
-      logModbusStatus(
-        `Modbus toggle command for ${section.name} sent successfully.`,
-      );
-      await new Promise<void>((resolve, reject) => {
-        updateSection(
-          section.id,
-          section.name,
-          section.ip!,
-          section.cleaningDays,
-          desiredState,
-          success => {
-            if (success) {
-              logModbusStatus(`Database updated for ${section.name}.`);
-              resolve();
-            } else {
-              logModbusStatus(`Failed DB update for ${section.name}.`);
-              reject(new Error(`DB Update Failed`));
-            }
-          },
-        );
+      await getSectionsWithStatus(async sectionsData => {
+        const updatedSections = sectionsData.map(section => {
+          const isConnected = !!section.ip;
+          return {
+            id: section.id!,
+            name: section.name,
+            connected: isConnected,
+            working: section.working,
+            ip: section.ip || null,
+            cleaningDays: section.cleaningDays,
+          };
+        });
+        setSections(updatedSections);
+        const connectedSections = updatedSections.filter(s => s.connected);
+        const allConnectedWorking =
+          connectedSections.length > 0 &&
+          connectedSections.every(s => s.working);
+        setAllSectionsWorking(allConnectedWorking);
       });
-      logModbusStatus(`Toggle and update complete for ${section.name}.`);
-    } catch (error: any) {
-      logModbusStatus(
-        `Error during toggle operation for ${section.name}: ${
-          error.message || error
-        }`,
-      );
+    } catch (error) {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const handleToggleAllSections = async (newStatus: boolean) => {
-    setLoading(true);
-    logModbusStatus(
-      `Attempting to toggle all connected sections to ${
-        newStatus ? 'ON' : 'OFF'
-      }...`,
-    );
-    const connectedSections = sections.filter(
-      section => section.connected && section.ip,
-    );
-    if (connectedSections.length === 0) {
-      logModbusStatus('No connected sections.');
-      setLoading(false);
-      return;
-    }
+  useEffect(() => {
+    fetchData();
+    const unsubscribe = navigation.addListener('focus', fetchData);
+    return unsubscribe;
+  }, [fetchData, navigation]);
 
-    const modbusResults = await Promise.allSettled(
-      connectedSections.map(section => {
-        logModbusStatus(
-          `Sending ${newStatus ? 'ON' : 'OFF'} command to ${section.name}...`,
-        );
-        return toggleLamp(section.ip!, 502, newStatus);
-      }),
-    );
-
-    modbusResults.forEach((result, index) => {
-      const sectionName = connectedSections[index].name;
-      if (result.status === 'fulfilled') {
-        logModbusStatus(`Toggle command for ${sectionName} sent successfully.`);
-      } else {
-        logModbusStatus(
-          `Error sending toggle command for ${sectionName}: ${
-            result.reason?.message || result.reason
-          }`,
-        );
+  const handleToggleSwitch = useCallback(
+    async (index: number) => {
+      const section = sections[index];
+      if (!section.connected || !section.ip) {
+        return;
       }
-    });
+      setLoading(true);
+      const desiredState = !powerStatusStore.powerStatus[section.id];
 
-    logModbusStatus(
-      "Modbus 'Toggle All' commands attempt finished. Updating database entries...",
-    );
+      // Optimistically update the Zustand store immediately
+      powerStatusStore.setPowerStatus(section.id, desiredState);
 
-    const dbUpdatePromises = connectedSections.map(section => {
-      return new Promise<void>(resolve => {
-        updateSection(
-          section.id,
-          section.name,
-          section.ip!,
-          section.cleaningDays,
-          newStatus,
-          success => {
-            if (!success) {
-              logModbusStatus(`Warning: Failed DB update for ${section.name}`);
-            }
-            resolve();
-          },
-        );
-      });
-    });
-    await Promise.all(dbUpdatePromises);
+      try {
+        await toggleLamp(section.ip!, 502, desiredState);
 
-    logModbusStatus(
-      "Database 'Toggle All' updates attempted. Updating local state...",
-    );
-
-    const finalSectionsState = sections.map(section => ({
-      ...section,
-      working: section.connected && section.ip ? newStatus : section.working,
-    }));
-    setSections(finalSectionsState);
-    setAllSectionsWorking(newStatus);
-    logModbusStatus("'Toggle All' operation complete.");
-    setLoading(false);
-  };
-
-  const {statusBySection} = useStatusStore();
-
-  // Helper to get section name by id
-
-  // Aggregate error/warning counts for each status type
-  const dpsErrorCount = Object.values(statusBySection).filter(
-    s => s.dps.status === 'error',
-  ).length;
-  const dpsWarningCount = Object.values(statusBySection).filter(
-    s => s.dps.status === 'warning',
-  ).length;
-  const pressureErrorCount = Object.values(statusBySection).filter(
-    s => s.pressureButton.status === 'error',
-  ).length;
-  const pressureWarningCount = Object.values(statusBySection).filter(
-    s => s.pressureButton.status === 'warning',
-  ).length;
-  const lampErrorCount = Object.values(statusBySection).filter(s =>
-    Object.values(s.lamps).some(lamp => lamp.status === 'error'),
-  ).length;
-  const lampWarningCount = Object.values(statusBySection).filter(s =>
-    Object.values(s.lamps).some(lamp => lamp.status === 'warning'),
-  ).length;
-  const cleaningErrorCount = Object.values(statusBySection).filter(
-    s => s.cleaning.status === 'error',
-  ).length;
-  const cleaningWarningCount = Object.values(statusBySection).filter(
-    s => s.cleaning.status === 'warning',
-  ).length;
-
-  const errorCount =
-    dpsErrorCount + pressureErrorCount + lampErrorCount + cleaningErrorCount ||
-    0;
-  const warningCount =
-    dpsWarningCount +
-      pressureWarningCount +
-      lampWarningCount +
-      cleaningWarningCount || 0;
-
-  const renderGridItem = ({item, index}: {item: any; index: number}) => {
-    const status = statusBySection[item.id]?.dps.status || 'stable';
-
-    return (
-      <TouchableOpacity
-        style={[styles.gridItem, {flex: 1}]}
-        onPress={() => {
-          if (item.connected) {
-            navigation.navigate('Section', {
-              sectionId: item.id as number,
-              sectionName: item.name as string,
-              sectionIp: item.ip as string | null,
-            });
-            setCurrentSectionId(item.id);
-          } else {
-            logModbusStatus(
-              `Cannot navigate: Section ${item.name} is disconnected.`,
-            );
-          }
-        }}
-        disabled={!item.connected || loading}>
-        <View style={sectionCard(status, item.connected)}>
-          <View style={styles.sectionHeader}>
-            <Text style={cardText(status, item.connected)}>
-              {item.connected ? status : 'disconnected'}
-            </Text>
-            <View style={cardIcon(status, item.connected)}>
-              {item.connected ? (
-                status === 'stable' ? (
-                  <CheckIcon2 fill={'#fff'} width={24} height={24} />
-                ) : status === 'error' ? (
-                  <View style={styles.errorIconContainer}>
-                    <View style={styles.errorIconRingLarge} />
-                    <View style={styles.errorIconRingSmall} />
-                    <InfoIcon stroke={COLORS.error[600]} />
-                  </View>
-                ) : (
-                  <InfoIcon stroke={'#fff'} />
-                )
-              ) : (
-                <InfoIcon stroke={COLORS.gray[400]} />
-              )}
-            </View>
-          </View>
-          <View style={styles.sectionHeader}>
-            <Text
-              style={[
-                styles.sectionTitle,
-                !item.connected && {color: COLORS.gray[400]},
-              ]}>
-              {item.name}
-            </Text>
-            <CustomSwitch
-              value={
-                item.connected
-                  ? powerStatusStore.powerStatus[item.id] ?? false
-                  : false
+        await new Promise<void>((resolve, reject) => {
+          updateSection(
+            section.id,
+            section.name,
+            section.ip!,
+            section.cleaningDays,
+            desiredState,
+            success => {
+              if (success) {
+                resolve();
+              } else {
+                reject(new Error(`DB Update Failed`));
               }
-              onToggle={() => handleToggleSwitch(index)}
-              disabled={!item.connected || loading}
-            />
-          </View>
-        </View>
-      </TouchableOpacity>
-    );
-  };
+            },
+          );
+        });
+      } catch (error: any) {
+      } finally {
+        setLoading(false);
+      }
+    },
+    [sections, powerStatusStore],
+  );
+
+  const handleToggleAllSections = useCallback(
+    async (newStatus: boolean) => {
+      setLoading(true);
+
+      const connectedSections = sections.filter(
+        section => section.connected && section.ip,
+      );
+      if (connectedSections.length === 0) {
+        setLoading(false);
+        return;
+      }
+
+      const modbusResults = await Promise.allSettled(
+        connectedSections.map(section => {
+          return toggleLamp(section.ip!, 502, newStatus);
+        }),
+      );
+
+      modbusResults.forEach((result, index) => {
+        const sectionName = connectedSections[index].name;
+        if (result.status === 'fulfilled') {
+        } else {
+        }
+      });
+
+      const dbUpdatePromises = connectedSections.map(section => {
+        return new Promise<void>(resolve => {
+          updateSection(
+            section.id,
+            section.name,
+            section.ip!,
+            section.cleaningDays,
+            newStatus,
+            success => {
+              if (!success) {
+              }
+              resolve();
+            },
+          );
+        });
+      });
+      await Promise.all(dbUpdatePromises);
+
+      const finalSectionsState = sections.map(section => ({
+        ...section,
+        working: section.connected && section.ip ? newStatus : section.working,
+      }));
+      setSections(finalSectionsState);
+      setAllSectionsWorking(newStatus);
+
+      setLoading(false);
+    },
+    [sections],
+  );
+
+  const handleNavigate = useCallback(
+    (item: any) => {
+      if (item.connected) {
+        navigation.navigate('Section', {
+          sectionId: item.id as number,
+          sectionName: item.name as string,
+          sectionIp: item.ip as string | null,
+        });
+        setCurrentSectionId(item.id);
+      } else {
+      }
+    },
+    [navigation, setCurrentSectionId],
+  );
+
+  const renderGridItem = useCallback(
+    ({item, index}: {item: any; index: number}) => (
+      <SectionCard
+        item={item}
+        index={index}
+        loading={loading}
+        powerStatus={powerStatusStore.powerStatus[item.id] ?? false}
+        onToggleSwitch={handleToggleSwitch}
+        onNavigate={handleNavigate}
+      />
+    ),
+    [loading, powerStatusStore.powerStatus, handleToggleSwitch, handleNavigate],
+  );
 
   return (
     <Layout>
@@ -334,11 +341,11 @@ export default function Home() {
           <Text style={styles.title}>Sections</Text>
           <View style={styles.warningContainer}>
             <View style={styles.warningBox}>
-              <View style={warningDot(COLORS.warning[500])} />
+              <WarningDot color={COLORS.warning[500]} />
               <Text style={styles.warningText}>{warningCount} Warnings</Text>
             </View>
             <View style={styles.warningBox}>
-              <View style={warningDot(COLORS.error[500])} />
+              <WarningDot color={COLORS.error[500]} />
               <Text style={styles.warningText}>{errorCount} Errors</Text>
             </View>
           </View>
@@ -360,7 +367,10 @@ export default function Home() {
           contentContainerStyle={styles.gridContentContainer}
           showsVerticalScrollIndicator={false}
           scrollEnabled={!loading}
-          extraData={loading}
+          extraData={[loading, powerStatusStore.powerStatus]}
+          initialNumToRender={8}
+          maxToRenderPerBatch={8}
+          windowSize={5}
         />
 
         <View style={styles.bottomSwitchContainer}>
@@ -376,8 +386,9 @@ export default function Home() {
       </View>
     </Layout>
   );
-}
+};
 
+// Styles remain the same as in your original code
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -412,6 +423,12 @@ const styles = StyleSheet.create({
   },
   warningText: {
     color: COLORS.warning[700],
+  },
+  warningDot: {
+    marginRight: 10,
+    width: 10,
+    height: 10,
+    borderRadius: 500,
   },
   gridContentContainer: {
     gap: 16,
@@ -488,14 +505,6 @@ const styles = StyleSheet.create({
   },
 });
 
-const warningDot = (color: string): ViewStyle => ({
-  marginRight: 10,
-  backgroundColor: color,
-  width: 10,
-  height: 10,
-  borderRadius: 500,
-});
-
 const sectionCard = (status: string, connected?: boolean): ViewStyle => ({
   borderWidth: connected ? 0 : 1,
   borderColor: COLORS.gray[100],
@@ -559,3 +568,5 @@ const cardText = (status: string, connected: boolean): TextStyle => ({
   fontSize: 14,
   fontWeight: '500',
 });
+
+export default memo(Home);

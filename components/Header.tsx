@@ -17,7 +17,6 @@ import {
   Logo,
   SettingsIcon,
   GridIcon,
-  DoorIcon,
   CleaningIcon,
   CheckIcon,
   CustomerServiceIcon,
@@ -28,7 +27,6 @@ import {
 } from '../icons';
 import {useNavigation, useRoute} from '@react-navigation/native';
 import {COLORS} from '../constants/colors';
-import {getSectionsWithStatus} from '../utils/db';
 import {useStatusStore} from '../utils/statusStore';
 import TooltipContent from './TooltipContent';
 import PopupModal from './PopupModal';
@@ -44,8 +42,7 @@ const Header = () => {
   const currentPage = route.name;
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [password, setPassword] = useState(['', '', '', '']);
-  const {currentSectionId} = useCurrentSectionStore();
-  console.log('currentSectionId', currentSectionId);
+  const {currentSectionId, setCurrentSectionId} = useCurrentSectionStore();
 
   const handleKeyPress = (key: string | number) => {
     let newPassword = [...password];
@@ -80,23 +77,6 @@ const Header = () => {
     }
   };
 
-  const params = route.params as {sectionId?: number};
-
-  const [sections, setSections] = useState<
-    {id: number; name: string; cleaningDays: number}[]
-  >([]);
-  const {setCurrentSectionId} = useCurrentSectionStore();
-
-  React.useEffect(() => {
-    getSectionsWithStatus(secs => {
-      setSections(
-        secs
-          .filter(s => s.id !== undefined)
-          .map(s => ({id: s.id!, name: s.name, cleaningDays: s.cleaningDays})),
-      );
-    });
-  }, []);
-
   const {statusBySection, fetchAllStatuses} = useStatusStore();
 
   useEffect(() => {
@@ -107,7 +87,7 @@ const Header = () => {
   // Helper to get section name by id
   const getSectionStatusCounts = (
     sectionId: number | null,
-    statusBySection: Record<number, SectionStatus>,
+    statusBySection: Record<number, any>,
   ) => {
     if (sectionId === null) {
       // Return global counts if no section is selected
@@ -140,7 +120,6 @@ const Header = () => {
     }
 
     const sectionStatus = statusBySection[sectionId];
-    console.log('sectionStatus', sectionStatus);
 
     if (!sectionStatus) {
       return {

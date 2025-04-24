@@ -1,4 +1,4 @@
-import React, {useState, useEffect} from 'react';
+import React, {useState, useEffect, useCallback, useMemo} from 'react';
 import {View, Text, StyleSheet, TouchableOpacity} from 'react-native';
 import {createMaterialTopTabNavigator} from '@react-navigation/material-top-tabs';
 import IpAddressScreen from '../tabs/IpAddressScreen';
@@ -11,14 +11,11 @@ import {COLORS} from '../../constants/colors';
 import {useNavigation, NavigationProp} from '@react-navigation/native';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 
-// --- Define Navigation Prop Type ---
-// Assuming 'Settings' is the name of this route in your navigator stack
-// and it can navigate to 'Home'
 type RootStackParamList = {
-  Home: undefined; // Assuming Home takes no params
-  Settings: undefined; // Assuming Settings takes no params
-  // Add other routes and their params here
+  Home: undefined;
+  Settings: undefined;
 };
+
 type SettingsScreenNavigationProp = NavigationProp<
   RootStackParamList,
   'Settings'
@@ -26,94 +23,109 @@ type SettingsScreenNavigationProp = NavigationProp<
 
 const Tab = createMaterialTopTabNavigator();
 
+const KeyButton = React.memo(
+  ({
+    num,
+    onPress,
+  }: {
+    num: string | number;
+    onPress: (key: string | number) => void;
+  }) => (
+    <TouchableOpacity style={styles.keyButton} onPress={() => onPress(num)}>
+      <Text style={styles.keyText}>{num}</Text>
+    </TouchableOpacity>
+  ),
+);
+
+const OtpDigit = React.memo(({digit}: {digit: string}) => (
+  <View style={styles.otpBox}>
+    <Text style={styles.otpText}>{digit}</Text>
+  </View>
+));
+
 const SettingsTabs = () => {
   const navigation = useNavigation<SettingsScreenNavigationProp>();
   const [isPasswordRequired, setIsPasswordRequired] = useState(false);
   const [password, setPassword] = useState(['', '', '', '']);
   const [isModalVisible, setIsModalVisible] = useState(true);
   const {setCurrentSectionId} = useCurrentSectionStore();
+
+  // Memoized keypad layout to prevent recreation on every render
+  const keypadLayout = useMemo(
+    () => [
+      [1, 2, 3],
+      [4, 5, 6],
+      [7, 8, 9],
+      ['0', 'DEL'],
+    ],
+    [],
+  );
+
   useEffect(() => {
     setCurrentSectionId(null);
   }, [setCurrentSectionId]);
 
-  useEffect(() => {
-    checkPasswordStatus();
+  const handleKeyPress = useCallback((key: string | number) => {
+    setPassword(prevPassword => {
+      const newPassword = [...prevPassword];
+
+      if (key === 'DEL') {
+        const lastFilledIndex = newPassword.reduceRight(
+          (acc, curr, index) => (curr !== '' && acc === -1 ? index : acc),
+          -1,
+        );
+
+        if (lastFilledIndex >= 0) {
+          newPassword[lastFilledIndex] = '';
+        }
+      } else {
+        const firstEmptyIndex = newPassword.indexOf('');
+        if (firstEmptyIndex !== -1) {
+          newPassword[firstEmptyIndex] = key.toString();
+        }
+      }
+
+      // Check password immediately after update
+      if (newPassword.join('') === '3645') {
+        setIsModalVisible(false);
+        setIsPasswordRequired(false);
+      }
+
+      return newPassword;
+    });
   }, []);
 
-  const checkPasswordStatus = async () => {
-    const hasEnteredPassword = false;
-    console.log('hasEnteredPassword', hasEnteredPassword);
-  };
+  const handleModalClose = useCallback(() => {
+    setIsModalVisible(false);
+    navigation.navigate('Home');
+  }, [navigation]);
 
-  const handleKeyPress = (key: string | number) => {
-    let newPassword = [...password];
-
-    if (key === 'DEL') {
-      // Find the index of the last non-empty digit
-      let lastFilledIndex = newPassword.length - 1;
-      while (lastFilledIndex >= 0 && newPassword[lastFilledIndex] === '') {
-        lastFilledIndex--;
-      }
-
-      // If a non-empty digit is found, clear it
-      if (lastFilledIndex >= 0) {
-        newPassword[lastFilledIndex] = '';
-      }
-    } else {
-      // Find the first empty digit and fill it
-      const firstEmptyIndex = newPassword.findIndex(p => p === '');
-      if (firstEmptyIndex !== -1) {
-        newPassword[firstEmptyIndex] = key.toString();
-      }
-    }
-
-    setPassword(newPassword);
-
-    // Check if the password is correct
-    if (newPassword.join('') === '3645') {
-      setIsModalVisible(false);
-      setIsPasswordRequired(false);
-    }
-  };
+  const renderKeyRow = useCallback(
+    (row: (string | number)[]) => (
+      <View key={row.join('-')} style={styles.keyRow}>
+        {row.map(num => (
+          <KeyButton key={num} num={num} onPress={handleKeyPress} />
+        ))}
+      </View>
+    ),
+    [handleKeyPress],
+  );
 
   return (
     <>
       <PopupModal
         hideAcitons={true}
         visible={isModalVisible}
-        onClose={() => {
-          setIsModalVisible(false);
-          navigation.navigate('Home'); // Navigate to Home on close
-        }}
+        onClose={handleModalClose}
         title="Enter Password"
         onConfirm={() => {}}
         Icon={LockIcon}>
         <View style={styles.otpContainer}>
           {password.map((digit, index) => (
-            <View key={index} style={styles.otpBox}>
-              <Text style={styles.otpText}>{digit}</Text>
-            </View>
+            <OtpDigit key={index} digit={digit} />
           ))}
         </View>
-        <View style={styles.keypad}>
-          {[
-            [1, 2, 3],
-            [4, 5, 6],
-            [7, 8, 9],
-            ['0', 'DEL'],
-          ].map((row, rowIndex) => (
-            <View key={rowIndex} style={styles.keyRow}>
-              {row.map((num, index) => (
-                <TouchableOpacity
-                  key={index}
-                  style={styles.keyButton}
-                  onPress={() => handleKeyPress(num)}>
-                  <Text style={styles.keyText}>{num}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          ))}
-        </View>
+        <View style={styles.keypad}>{keypadLayout.map(renderKeyRow)}</View>
       </PopupModal>
 
       {!isPasswordRequired && (
@@ -122,6 +134,7 @@ const SettingsTabs = () => {
           screenOptions={{
             tabBarStyle: {display: 'none'},
             animationEnabled: false,
+            lazy: true, // Enable lazy loading of tabs
           }}>
           <Tab.Screen name="IP Address" component={IpAddressScreen} />
           <Tab.Screen name="Lamp Life" component={LampLifeScreen} />
@@ -133,6 +146,7 @@ const SettingsTabs = () => {
   );
 };
 
+// Memoize styles to prevent recreation on every render
 const styles = StyleSheet.create({
   otpContainer: {
     flexDirection: 'row',
@@ -177,4 +191,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default SettingsTabs;
+export default React.memo(SettingsTabs);

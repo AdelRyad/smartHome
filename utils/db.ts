@@ -36,8 +36,6 @@ const getDatabase = async () => {
 const initDatabase = async (): Promise<void> => {
   const db = await getDatabase();
   db.transaction(tx => {
-    console.log('Initializing database...');
-
     // Create sections table
     tx.executeSql(
       `CREATE TABLE IF NOT EXISTS sections (
@@ -86,7 +84,6 @@ const initDatabase = async (): Promise<void> => {
           {length: results.rows.length},
           (_, i) => results.rows.item(i).name,
         );
-        console.log(`Columns in ${table}:`, columns);
 
         if (!columns.includes(columnName)) {
           tx.executeSql(
@@ -106,7 +103,7 @@ const initDatabase = async (): Promise<void> => {
       (_, results) => {
         const count = results.rows.item(0).count;
         if (count === 0) {
-          console.log('Inserting default sections and devices...');
+          ('Inserting default sections and devices...');
           for (let i = 1; i <= 8; i++) {
             tx.executeSql(
               'INSERT INTO sections (name, ip, working, cleaningDays) VALUES (?, ?, ?, ?);',
@@ -136,7 +133,7 @@ const initDatabase = async (): Promise<void> => {
       (_, results) => {
         const count = results.rows.item(0).count;
         if (count === 0) {
-          console.log('Inserting default contact info...');
+          ('Inserting default contact info...');
           tx.executeSql(
             'INSERT INTO contact_info (name, email, phone, project_refrence, hood_refrence, commission_date) VALUES (?, ?, ?, ?, ?, ?);',
             [
@@ -195,8 +192,7 @@ const updateSectionDeviceStatus = async (
       'UPDATE devices SET workingHours = ? WHERE id = ?;',
       [workingHours, deviceId],
       () => callback(true),
-      (_, error) => {
-        console.error('SQL error:', error);
+      _ => {
         callback(false);
         return false;
       },
@@ -290,8 +286,6 @@ export const updateContactInfo = async (
   contact: ContactInfo, // Use local ContactInfo type
   callback: (success: boolean) => void,
 ) => {
-  console.log('Updating contact info:', contact);
-
   const db = await getDatabase(); // Get DB instance
   db.transaction(tx => {
     tx.executeSql(
@@ -308,18 +302,16 @@ export const updateContactInfo = async (
       (_, resultSet) => {
         // Check if the update was successful (e.g., rowsAffected > 0)
         if (resultSet.rowsAffected > 0) {
-          console.log('Contact info updated successfully in DB');
+          ('Contact info updated successfully in DB');
           callback(true);
         } else {
           // Handle case where row wasn't found or update didn't happen
-          console.warn('Contact info update did not affect any rows.');
           // Decide if this is a success or failure based on your logic
           callback(false); // Or true if not finding the row is acceptable
         }
       },
-      (_, error) => {
+      _ => {
         // SQL error
-        console.error('Error updating contact info:', error);
         callback(false);
         return false; // Indicate transaction failure
       },

@@ -24,6 +24,7 @@ import {getSectionsWithStatus, getDevicesForSection} from '../../utils/db';
 import {setLampMaxHours} from '../../utils/modbus';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 import useWorkingHoursStore from '../../utils/workingHoursStore';
+
 interface SectionSummary {
   id: number;
   name: string;
@@ -39,7 +40,7 @@ interface LampHours {
 export const LampLifeScreen = () => {
   const {width, height} = useWindowDimensions();
   const isPortrait = height > width;
-  const {workingHours} = useWorkingHoursStore(); // Get working hours from store
+  const {workingHours} = useWorkingHoursStore();
 
   const [sections, setSections] = useState<SectionSummary[]>([]);
   const [selectedSection, setSelectedSection] = useState<SectionSummary | null>(
@@ -48,7 +49,6 @@ export const LampLifeScreen = () => {
   const [devices, setDevices] = useState<any[]>([]);
   const [edit, setEdit] = useState(false);
   const [focusedInputId, setFocusedInputId] = useState<number | null>(null);
-  const [statusMessage, setStatusMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [editedMaxHours, setEditedMaxHours] = useState<{
     [deviceId: number]: string;
@@ -56,12 +56,6 @@ export const LampLifeScreen = () => {
   const [modalVisible, setModalVisible] = useState(false);
 
   const {setCurrentSectionId} = useCurrentSectionStore();
-
-  const logStatus = useCallback((message: string, isError = false) => {
-    console.log(`[Lamp Life Status] ${message}`);
-    setStatusMessage(message);
-    setTimeout(() => setStatusMessage(''), isError ? 6000 : 4000);
-  }, []);
 
   // Get lamp data from store for the selected section
   const getLampDataFromStore = useCallback(
@@ -71,11 +65,7 @@ export const LampLifeScreen = () => {
       const sectionData = workingHours[selectedSection.id];
       if (!sectionData) return {currentHours: null, maxHours: null};
 
-      // Device IDs 1-4 correspond to lamp IDs 1-4
-      const lampId = deviceId >= 1 && deviceId <= 4 ? deviceId : null;
-      if (!lampId) return {currentHours: null, maxHours: null};
-
-      return sectionData[lampId] || {currentHours: null, maxHours: null};
+      return sectionData[deviceId] || {currentHours: null, maxHours: null};
     },
     [workingHours, selectedSection],
   );
@@ -105,46 +95,13 @@ export const LampLifeScreen = () => {
         ]);
 
         setDevices(devicesFromDb || []);
-
-        if (!devicesFromDb || devicesFromDb.length === 0) {
-          logStatus(`No devices found for section ${section.name}.`);
-          setLampHours({});
-          setLoading(false);
-          return;
-        }
-
-        const fetchedHours: {[deviceId: number]: LampHours} = {};
-        const deviceIds = devicesFromDb.map(d => d.id).sort((a, b) => a - b); // Process in order
-
-        logStatus(`Reading shared max hours for section...`);
-
-        if (sharedMaxHours !== null) {
-          logStatus(`Shared max hours fetched successfully: ${sharedMaxHours}`);
-          for (const deviceId of deviceIds) {
-            const lampIndex = deviceId;
-            if (lampIndex < 1 || lampIndex > 4) {
-              logStatus(`Skipping device ID ${deviceId} - invalid lamp index.`);
-              continue;
-            }
-            fetchedHours[deviceId] = {currentHours: sharedMaxHours};
-          }
-        } else {
-          logStatus('Shared max hours not available. Defaulting to 0.', true);
-          for (const deviceId of deviceIds) {
-            fetchedHours[deviceId] = {currentHours: 0};
-          }
-        }
-
-        setLampHours(fetchedHours);
-        logStatus('Finished fetching lamp data.');
-      } catch (dbError: any) {
-        logStatus(`Database error fetching devices: ${dbError.message}`, true);
+      } catch (error: any) {
         setDevices([]);
       } finally {
         setLoading(false);
       }
     },
-    [logStatus],
+    [],
   );
 
   // --- Handle Input Change during Edit ---
@@ -168,6 +125,7 @@ export const LampLifeScreen = () => {
           ip: section.ip,
           working: section.working,
         }));
+
       setSections(formattedSections);
 
       if (formattedSections.length > 0) {
@@ -175,11 +133,10 @@ export const LampLifeScreen = () => {
         setCurrentSectionId(formattedSections[0].id);
       } else {
         setSelectedSection(null);
-        logStatus('No sections with IP addresses found.', true);
       }
       setLoading(false);
     });
-  }, [logStatus, setCurrentSectionId]);
+  }, [setCurrentSectionId]);
 
   // Fetch devices when selected section changes
   useEffect(() => {
@@ -190,19 +147,12 @@ export const LampLifeScreen = () => {
 
   const handleEdit = () => {
     const initialEdits: {[deviceId: number]: string} = {};
-
-    // Initialize with the first lamp's max hours from store or 0
-    const firstLampId = devices.find(d => d.id >= 1 && d.id <= 4)?.id;
-    const initialValue = firstLampId
-      ? getLampDataFromStore(firstLampId).maxHours ?? 0
-      : 0;
-
     devices.forEach(device => {
       if (device.id >= 1 && device.id <= 4) {
-        initialEdits[device.id] = initialValue.toString();
+        const lampData = getLampDataFromStore(device.id);
+        initialEdits[device.id] = lampData.maxHours?.toString() || '0';
       }
     });
-
     setEditedMaxHours(initialEdits);
     setEdit(true);
   };
@@ -210,65 +160,53 @@ export const LampLifeScreen = () => {
   const handleCancel = () => {
     setEditedMaxHours({});
     setEdit(false);
-    logStatus('Changes cancelled.');
   };
 
+  const handleInputChange = (deviceId: number, text: string) => {
+    const numericText = text.replace(/[^0-9.]/g, '');
+    setEditedMaxHours(prev => {
+      const newState = {...prev};
+      devices.forEach((device, index) => {
+        console.log(`Device ID: ${device.id}, Index: ${index}`);
+
+        if (index >= 0 && index <= 4) {
+          newState[index] = numericText;
+        }
+      });
+      return newState;
+    });
+  };
 
   const executeSaveChanges = async () => {
     setModalVisible(false);
     if (!selectedSection || !selectedSection.ip) {
-      logStatus('Cannot save: No section selected or section has no IP.', true);
       return;
     }
 
     setLoading(true);
-    logStatus('Saving shared max hours...');
-    const sectionIp = selectedSection.ip;
-    let writeError = false;
+    let anyChangesSaved = false;
 
-    const firstEditedKey = Object.keys(editedMaxHours)[0];
-    const editedValueStr = firstEditedKey
-      ? editedMaxHours[parseInt(firstEditedKey, 10)]
-      : '0';
-    const editedValueNum = parseInt(editedValueStr, 10);
+    try {
+      for (const deviceIdStr in editedMaxHours) {
+        const deviceId = parseInt(deviceIdStr, 10);
+        const editedValue = editedMaxHours[deviceId];
+        const editedValueNum = parseInt(editedValue, 10);
+        const originalMax = getLampDataFromStore(deviceId).maxHours ?? 0;
 
-    // Get the original max hours from store for comparison
-    const originalMax = firstEditedKey
-      ? getLampDataFromStore(parseInt(firstEditedKey, 10)).maxHours ?? 0
-      : 0;
-
-    if (
-      !isNaN(editedValueNum) &&
-      editedValueNum >= 0 &&
-      editedValueNum <= 65535 &&
-      editedValueNum !== originalMax
-    ) {
-      try {
-        await setLampMaxHours(sectionIp, 502, editedValueNum, logStatus);
-      } catch (error) {
-        const errorMsg = `Write failed for Shared Max Hours: ${
-          error instanceof Error ? error.message : String(error)
-        }`;
-        logStatus(errorMsg, true);
-        writeError = true;
+        if (!isNaN(editedValueNum) && editedValueNum !== originalMax) {
+          await setLampMaxHours(selectedSection.ip, 502, editedValueNum);
+          anyChangesSaved = true;
+        }
       }
-    } else if (editedValueNum === originalMax) {
-      logStatus('No changes detected in max hours.');
-    } else {
-      logStatus(
-        `Invalid value entered: ${editedValueStr}. Save cancelled.`,
-        true,
-      );
-      writeError = true;
+
+      if (anyChangesSaved) {
+      } else {
+      }
+    } catch (error: any) {
+    } finally {
+      setLoading(false);
+      setEdit(false);
     }
-
-    logStatus(
-      writeError ? 'Save completed with error(s).' : 'Save successful.',
-      writeError,
-    );
-
-    setLoading(false);
-    setEdit(false);
   };
 
   const handleConfirmChanges = () => {
@@ -278,18 +216,14 @@ export const LampLifeScreen = () => {
       const originalMax = getLampDataFromStore(deviceId).maxHours ?? 0;
       const editedValueStr = editedMaxHours[deviceId];
       const editedValueNum = parseInt(editedValueStr, 10);
-      if (
-        !isNaN(editedValueNum) &&
-        editedValueNum >= 0 &&
-        editedValueNum !== originalMax
-      ) {
+
+      if (!isNaN(editedValueNum)) {
         changesMade = true;
         break;
       }
     }
 
     if (!changesMade) {
-      logStatus('No changes to save.');
       setEdit(false);
       return;
     }
@@ -373,13 +307,8 @@ export const LampLifeScreen = () => {
               editable={edit && isMonitoredLamp && !loading}
               placeholder="Max Hrs"
               placeholderTextColor={COLORS.gray[600]}
-              keyboardType="decimal-pad"
-              onChangeText={text => {
-                const numericText = text.replace(/[^0-9.]/g, ''); // Allow only numbers and a single decimal point
-                if (numericText.length <= 5) {
-                  handleInputChange(deviceId, numericText);
-                }
-              }}
+              keyboardType="number-pad"
+              onChangeText={text => handleInputChange(deviceId, text)}
               onFocus={() => setFocusedInputId(deviceId)}
               onBlur={() => setFocusedInputId(null)}
               returnKeyType="done"
@@ -398,18 +327,10 @@ export const LampLifeScreen = () => {
         </View>
       )}
 
-      {statusMessage ? (
-        <View style={styles.statusMessageContainer}>
-          <Text style={styles.statusMessageText}>{statusMessage}</Text>
-        </View>
-      ) : null}
-
       <PopupModal
         visible={modalVisible}
         onConfirm={executeSaveChanges}
-        onClose={() => {
-          setModalVisible(false);
-        }}
+        onClose={() => setModalVisible(false)}
         title="Confirmation needed"
         Icon={CheckIcon}>
         <View style={styles.modalContent}>
@@ -437,7 +358,7 @@ export const LampLifeScreen = () => {
                 renderItem={renderScrollItem}
                 keyExtractor={item => item.id.toString()}
                 showsVerticalScrollIndicator={false}
-                extraData={selectedSection?.id || null}
+                extraData={selectedSection?.id}
               />
             ) : !loading ? (
               <View style={styles.noSectionsContainer}>
@@ -458,14 +379,7 @@ export const LampLifeScreen = () => {
               columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
               contentContainerStyle={styles.gridContentContainer}
               showsVerticalScrollIndicator={false}
-              extraData={{
-                edit,
-                workingHours,
-                editedMaxHours,
-                handleInputChange,
-                focusedInputId,
-                loading,
-              }}
+              extraData={{edit, editedMaxHours, focusedInputId, loading}}
             />
           ) : !loading ? (
             <View style={styles.noSectionsContainer}>
@@ -497,7 +411,10 @@ export const LampLifeScreen = () => {
           </>
         ) : (
           <TouchableOpacity
-            style={[styles.editButton, {opacity: loading ? 0.5 : 1}]}
+            style={[
+              styles.editButton,
+              {opacity: !selectedSection || loading ? 0.5 : 1},
+            ]}
             onPress={handleEdit}
             disabled={!selectedSection || loading}>
             <EditIcon fill={COLORS.gray[600]} width={24} height={24} />
@@ -508,7 +425,6 @@ export const LampLifeScreen = () => {
     </Layout>
   );
 };
-
 // --- Styles (Reverted to Original Structure) ---
 const styles = StyleSheet.create({
   loadingOverlay: {
