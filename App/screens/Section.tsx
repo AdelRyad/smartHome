@@ -26,6 +26,7 @@ import {resetLampHours, resetCleaningHours} from '../../utils/modbus';
 import useCleaningHoursStore from '../../utils/cleaningHoursStore';
 import useWorkingHoursStore from '../../utils/workingHoursStore';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
+import {readLifeHoursSetpoint} from '../../utils/modbus';
 
 type RouteParams = {
   sectionId: string;
@@ -86,9 +87,9 @@ const GridItem = memo(
     const remainingHours = Math.floor(maxHours - currentHours);
 
     const progressBarHeight = useMemo(() => {
-      if (!isLampActive || hoursInfo.currentHours === null) return '0%';
-      const progress = 100 - (currentHours / maxHours) * 100;
-      return `${progress}%`;
+      if (!isLampActive || hoursInfo.currentHours === null) return 0;
+      const progress = ((maxHours - currentHours) / maxHours) * 100;
+      return progress;
     }, [isLampActive, hoursInfo.currentHours, currentHours, maxHours]);
 
     const progressBarColor = useMemo(() => {
@@ -104,6 +105,17 @@ const GridItem = memo(
       () => selectedDevices.some(d => d.id === item.id),
       [selectedDevices, item.id],
     );
+    useEffect(() => {
+      const fetchLifeHours = async () => {
+        try {
+          const setpoint = await readLifeHoursSetpoint('192.168.1.2', 502);
+          console.log('Setpoint:', setpoint);
+        } catch (error) {
+          console.error('Error fetching life hours setpoint:', error);
+        }
+      };
+      fetchLifeHours();
+    }, []);
 
     return (
       <TouchableOpacity
@@ -156,7 +168,7 @@ const GridItem = memo(
                 style={[
                   styles.progressBar,
                   {
-                    height: progressBarHeight,
+                    height: `${progressBarHeight}%`,
                     backgroundColor: progressBarColor,
                   },
                 ]}
@@ -301,43 +313,41 @@ const Section = () => {
   }, [section?.ip, isResettingCleaningHours, logStatus]);
 
   const executeLampReset = useCallback(async () => {
-    if (!section || !section.ip || selectedDevices.length === 0) {
-      logStatus(
-        'Cannot reset lamp hours: Section/IP missing or no lamps selected.',
-        true,
-      );
+    if (!section?.ip || selectedDevices.length === 0) {
+      logStatus('Cannot reset: Missing section IP or no lamps selected', true);
       setModalMode(null);
       return;
     }
+
     setModalMode(null);
-    logStatus(
-      `Resetting LIFE hours for ${selectedDevices.length} selected lamps...`,
-    );
+    logStatus(`Resetting ${selectedDevices.length} lamp(s)...`);
 
-    const resetPromises = selectedDevices.map((device: {id: number}) => {
-      const lampIndexToReset = device.id;
-      if (lampIndexToReset >= 1 && lampIndexToReset <= 4) {
-        return resetLampHours(
-          section.ip,
-          502,
-          lampIndexToReset,
-          logStatus,
-        ).catch(error => {
-          logStatus(
-            `Reset failed for Lamp ${lampIndexToReset}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-            true,
-          );
-        });
-      }
-      return Promise.resolve();
-    });
+    let successCount = 0;
+    let failureCount = 0;
 
-    await Promise.allSettled(resetPromises);
-    logStatus('Finished LIFE reset attempts.');
-    setEditLifeHours(false);
-    setSelectedDevices([]);
+    try {
+      await Promise.all(
+        selectedDevices.map(async (device: {id: number}) => {
+          if (device?.id >= 1 && device?.id <= 4) {
+            try {
+              await resetLampHours(section.ip, 502, device.id, logStatus);
+              successCount++;
+            } catch (error) {
+              failureCount++;
+              console.error(`Failed to reset lamp ${device.id}:`, error);
+            }
+          }
+        }),
+      );
+
+      logStatus(
+        `Reset completed: ${successCount} successful, ${failureCount} failed`,
+      );
+      setEditLifeHours(false);
+      setSelectedDevices([]);
+    } catch (error) {
+      logStatus(`Reset failed: ${error.message}`, true);
+    }
   }, [section, selectedDevices, logStatus]);
 
   const handleSelectDevice = useCallback((item: any) => {
@@ -399,6 +409,43 @@ const Section = () => {
       setDevices([]);
     }
   }, [section, logStatus]);
+
+  useEffect(() => {
+    return () => {
+      // Cleanup pollers and connections when component unmounts
+      if (section?.id) {
+        useWorkingStore.cleanup();
+        useCleaningStore.cleanup();
+      }
+      setSelectedDevices([]);
+      setDevices(null);
+      setSection(null);
+      setStatusMessage('');
+    };
+  }, []);
+
+  useEffect(() => {
+    const errorHandler = (error: Error) => {
+      console.error('Section component error:', error);
+      logStatus(`An error occurred: ${error.message}`, true);
+      // Reset component state
+      setEditLifeHours(false);
+      setSelectedDevices([]);
+      setPassword(['', '', '', '']);
+      setIsPasswordRequired(false);
+      setModalMode(null);
+    };
+
+    const errorListener = ErrorUtils.getGlobalHandler();
+    ErrorUtils.setGlobalHandler((error, isFatal) => {
+      errorHandler(error);
+      errorListener?.(error, isFatal);
+    });
+
+    return () => {
+      ErrorUtils.setGlobalHandler(errorListener);
+    };
+  }, [logStatus]);
 
   // Render functions
   const renderScrollItem = useCallback(
@@ -465,18 +512,27 @@ const Section = () => {
   );
 
   const renderGridItem = useCallback(
-    ({item}: {item: any}) => (
-      <GridItem
-        item={item}
-        editLifeHours={editLifeHours}
-        selectedDevices={selectedDevices}
-        workingHours={workingHours}
-        cleaningData={cleaningData}
-        currentSectionId={currentSectionId}
-        onSelectDevice={handleSelectDevice}
-        onLongPress={handleLongPress}
-      />
-    ),
+    ({item}: {item: any}) => {
+      // Validate item data before rendering
+      if (!item?.id) {
+        console.warn('Invalid grid item:', item);
+        return null;
+      }
+
+      return (
+        <GridItem
+          key={item.id}
+          item={item}
+          editLifeHours={editLifeHours}
+          selectedDevices={selectedDevices}
+          workingHours={workingHours}
+          cleaningData={cleaningData}
+          currentSectionId={currentSectionId}
+          onSelectDevice={handleSelectDevice}
+          onLongPress={handleLongPress}
+        />
+      );
+    },
     [
       editLifeHours,
       selectedDevices,
@@ -486,6 +542,20 @@ const Section = () => {
       handleSelectDevice,
       handleLongPress,
     ],
+  );
+
+  const getItemLayout = useCallback(
+    (_: any, index: number) => ({
+      length: 280, // Fixed height of grid items
+      offset: 280 * Math.floor(index / (isPortrait ? 1 : 3)),
+      index,
+    }),
+    [isPortrait],
+  );
+
+  const keyExtractor = useCallback(
+    (item: any) => item?.id?.toString() ?? `fallback-key-${Math.random()}`,
+    [],
   );
 
   return (
@@ -660,9 +730,8 @@ const Section = () => {
             numColumns={isPortrait ? 1 : 3}
             data={devices ?? []}
             renderItem={renderGridItem}
-            keyExtractor={(item, index) =>
-              item?.id?.toString() ?? `fallback-key-${index}`
-            }
+            keyExtractor={keyExtractor}
+            getItemLayout={getItemLayout}
             columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
             contentContainerStyle={styles.gridContentContainer}
             showsVerticalScrollIndicator={false}
@@ -677,9 +746,15 @@ const Section = () => {
               editLifeHours,
               selectedDevices,
             }}
-            initialNumToRender={10}
-            maxToRenderPerBatch={10}
+            removeClippedSubviews={true}
+            maxToRenderPerBatch={6}
             windowSize={5}
+            updateCellsBatchingPeriod={50}
+            initialNumToRender={6}
+            onEndReachedThreshold={0.5}
+            maintainVisibleContentPosition={{
+              minIndexForVisible: 0,
+            }}
           />
         </View>
       </View>

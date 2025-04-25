@@ -44,7 +44,7 @@ const Header = () => {
   const [password, setPassword] = useState(['', '', '', '']);
   const {setCurrentSectionId} = useCurrentSectionStore();
 
-  const {getSectionStatusSummary, fetchAllStatuses} = useStatusStore();
+  const {getSectionStatusSummary} = useStatusStore();
 
   const handleKeyPress = (key: string | number) => {
     let newPassword = [...password];
@@ -74,14 +74,6 @@ const Header = () => {
       setIsModalVisible(false);
     }
   };
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      fetchAllStatuses();
-    }, 300000); // 5 minutes in milliseconds
-
-    return () => clearInterval(interval);
-  }, [fetchAllStatuses]);
 
   const [elements, setElements] = useState<
     Array<{
@@ -129,27 +121,43 @@ const Header = () => {
 
   // Update elements when status changes
   useEffect(() => {
-    const updatedElements = elements.map(item => {
-      const summary = getSectionStatusSummary(item.title) || [];
-      const errorCount = summary.filter(s => s?.status === 'error').length;
-      const warningCount = summary.filter(s => s?.status === 'warning').length;
+    const updateElements = () => {
+      const statusStore = useStatusStore.getState();
+      const updatedElements = elements.map(item => {
+        const summary =
+          statusStore.getSectionStatusSummary(item.title as any) || [];
+        const errorCount = summary.filter(s => s?.status === 'error').length;
+        const warningCount = summary.filter(
+          s => s?.status === 'warning',
+        ).length;
+        console.log('summary', summary);
 
-      return {
-        ...item,
-        summary,
-        errorCount,
-        warningCount,
-        status:
-          errorCount > 0
-            ? ('error' as 'error')
-            : warningCount > 0
-            ? ('warning' as 'warning')
-            : ('good' as 'good'),
-      };
-    });
+        return {
+          ...item,
+          summary,
+          errorCount,
+          warningCount,
+          status:
+            errorCount > 0
+              ? ('error' as 'error')
+              : warningCount > 0
+              ? ('warning' as 'warning')
+              : ('good' as 'good'),
+        };
+      });
 
-    setElements(updatedElements);
-  }, [elements, getSectionStatusSummary]); // Update when status store changes
+      setElements(updatedElements);
+    };
+
+    // Initial update
+    updateElements();
+
+    // Subscribe to store changes
+    const unsubscribe = useStatusStore.subscribe(updateElements);
+
+    // Cleanup subscription on unmount
+    return () => unsubscribe();
+  }, []); // Empty dependency array since we handle updates via subscription
 
   const errorCount = elements.reduce((sum, item) => sum + item.errorCount, 0);
   const warningCount = elements.reduce(

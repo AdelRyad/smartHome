@@ -4,40 +4,56 @@ import {
   readSingleLampCleaningRunHours,
 } from './modbus';
 import {getSectionsWithStatus} from './db';
+import {AppState} from 'react-native';
 
-interface CleaningHoursState {
-  remainingCleaningHours: Record<
-    number,
-    {
-      setpoint: number | null;
-      current: number | null;
-      remaining: number | null;
-      loading: boolean;
-      error: string | null;
-      lastUpdated: number | null;
-    }
-  >;
-  fetchStatus: {
-    loading: boolean;
-    error: string | null;
-  };
-  setRemainingCleaningHours: (sectionId: number, hours: number | null) => void;
-  resetCleaningHours: (sectionId?: number) => void;
-  startFetching: (
-    sectionId: number,
-    ip: string,
-    interval: number,
-  ) => () => void;
+interface CleaningHoursData {
+  setpoint: number | null;
+  current: number | null;
+  remaining: number | null;
+  loading: boolean;
+  error: string | null;
+  lastUpdated: number | null;
 }
 
+interface CleaningHoursState {
+  remainingCleaningHours: Record<number, CleaningHoursData>;
+  isLoading: boolean;
+  error: string | null;
+  fetchCleaningHours: (sectionId: number, ip: string) => Promise<void>;
+  startPolling: (
+    sectionId: number,
+    ip: string,
+    interval?: number,
+  ) => () => void;
+  stopAllPolling: () => void;
+  cleanup: () => void;
+}
+
+const POLLING_INTERVAL = 15000; // 15 seconds
+const INITIAL_DELAY = 2000; // 2 second delay before first request
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 1000;
+
 const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
-  let pollingIntervals: Record<number, NodeJS.Timeout> = {};
+  const pollingIntervals: Record<number, NodeJS.Timeout> = {};
+  let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
+    null;
+  let isFirstRequest = true;
+
   const fetchCleaningHours = async (
     sectionId: number,
     ip: string,
     retryCount = 0,
   ) => {
+    if (!ip) return;
+
     try {
+      // Add delay for the first request only
+      if (isFirstRequest) {
+        await new Promise(resolve => setTimeout(resolve, INITIAL_DELAY));
+        isFirstRequest = false;
+      }
+
       set(state => ({
         remainingCleaningHours: {
           ...state.remainingCleaningHours,
@@ -47,16 +63,18 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
             error: null,
           },
         },
+        isLoading: true,
+        error: null,
       }));
 
-      // Sequential requests instead of Promise.all
-      const setpoint = await readCleaningHoursSetpoint(ip, 502);
-      await new Promise(resolve => setTimeout(resolve, 200)); // Small delay between requests
-      const currentHours = await readSingleLampCleaningRunHours(ip, 502);
+      const [setpoint, currentHours] = await Promise.all([
+        readCleaningHoursSetpoint(ip, 502),
+        readSingleLampCleaningRunHours(ip, 502),
+      ]);
 
       const remaining =
         setpoint !== null && currentHours !== null
-          ? Math.max(0, Math.floor(setpoint - currentHours)) // Ensure non-negative
+          ? Math.max(0, Math.floor(setpoint - currentHours))
           : null;
 
       set(state => ({
@@ -71,12 +89,24 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
             lastUpdated: Date.now(),
           },
         },
+        isLoading: false,
       }));
     } catch (error) {
-      if (retryCount < 2) {
-        await new Promise(resolve =>
-          setTimeout(resolve, 1000 * (retryCount + 1)),
+      console.error(
+        `Error fetching cleaning hours for section ${sectionId}:`,
+        error,
+      );
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+
+      // Retry logic for timeouts
+      if (errorMessage.includes('timeout') && retryCount < MAX_RETRIES) {
+        console.log(
+          `Retrying cleaning hours fetch (attempt ${
+            retryCount + 1
+          }/${MAX_RETRIES})...`,
         );
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
         return fetchCleaningHours(sectionId, ip, retryCount + 1);
       }
 
@@ -86,122 +116,104 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
           [sectionId]: {
             ...(state.remainingCleaningHours[sectionId] || {}),
             loading: false,
-            error: error.message,
+            error: errorMessage,
           },
         },
-        fetchStatus: {
-          loading: false,
-          error: `Section ${sectionId}: ${error.message}`,
-        },
+        isLoading: false,
+        error: `Failed to fetch cleaning hours for section ${sectionId}: ${errorMessage}`,
       }));
     }
   };
 
-  const fetchAllSectionsData = async () => {
-    try {
-      set({fetchStatus: {loading: true, error: null}});
-      const sections = await new Promise<any[]>(resolve => {
-        getSectionsWithStatus(resolve);
-      });
-
-      // Process sections sequentially
-      for (const section of sections) {
-        if (section.ip) {
-          await fetchCleaningHours(section.id, section.ip);
-          await new Promise(resolve => setTimeout(resolve, 300)); // Delay between sections
-        }
-      }
-    } catch (error) {
-      set({
-        fetchStatus: {
-          loading: false,
-          error: `Global fetch error: ${error.message}`,
-        },
-      });
-    } finally {
-      set({fetchStatus: {loading: false, error: null}});
-    }
-  };
-
-  const startPolling = (sectionId: number, ip: string, interval = 10000) => {
-    // Clear existing interval if any
-    if (pollingIntervals[sectionId]) {
-      clearInterval(pollingIntervals[sectionId]);
-    }
-
-    // Initial fetch
-    fetchCleaningHours(sectionId, ip);
-
-    // Set up polling with jitter to avoid request bursts
-    const jitteredInterval = interval + Math.random() * 2000 - 1000;
-    pollingIntervals[sectionId] = setInterval(
-      () => fetchCleaningHours(sectionId, ip),
-      jitteredInterval,
-    );
-
-    // Return cleanup function
-    return () => {
+  const startPolling = (
+    sectionId: number,
+    ip: string,
+    interval = POLLING_INTERVAL,
+  ) => {
+    const stopPolling = (sectionId: number) => {
       if (pollingIntervals[sectionId]) {
         clearInterval(pollingIntervals[sectionId]);
         delete pollingIntervals[sectionId];
       }
     };
+
+    stopPolling(sectionId);
+    pollingIntervals[sectionId] = setInterval(() => {
+      fetchCleaningHours(sectionId, ip);
+    }, interval);
+    return () => stopPolling(sectionId);
   };
-  // Throttled version of fetchAllSectionsData
+
+  const stopAllPolling = () => {
+    Object.keys(pollingIntervals).forEach(sectionId => {
+      const stopPolling = (sectionId: number) => {
+        if (pollingIntervals[sectionId]) {
+          clearInterval(pollingIntervals[sectionId]);
+          delete pollingIntervals[sectionId];
+        }
+      };
+      stopPolling(Number(sectionId));
+    });
+  };
+
+  const cleanup = () => {
+    stopAllPolling();
+    if (appStateListener) {
+      appStateListener.remove();
+      appStateListener = null;
+    }
+  };
+
+  // Initialize when store is created
   const initialize = async () => {
+    cleanup();
+
     try {
       const sections = await new Promise<any[]>(resolve => {
         getSectionsWithStatus(resolve);
       });
 
-      // Start with delay between sections
-      sections.forEach((section, index) => {
-        if (section.ip) {
-          setTimeout(
-            () => startPolling(section.id, section.ip, 15000),
-            index * 3000, // 3s delay between each section initialization
-          );
+      // Add null/undefined check for sections
+      if (!sections || !Array.isArray(sections)) {
+        throw new Error('Invalid sections data received');
+      }
+      console.log('sections', sections);
+
+      sections.forEach(section => {
+        // Add proper null checks for section and its properties
+        if (section?.id && section?.ip) {
+          startPolling(section.id, section.ip);
+        }
+      });
+
+      // Handle app state changes
+      appStateListener = AppState.addEventListener('change', nextAppState => {
+        if (nextAppState === 'active') {
+          initialize();
+        } else if (nextAppState === 'background') {
+          cleanup();
         }
       });
     } catch (error) {
-      console.error('Error initializing sections:', error);
+      console.error('Error initializing cleaning hours store:', error);
+      set({
+        error: `Initialization failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        isLoading: false,
+      });
     }
   };
-
-  // Define startFetching function
-  const startFetching = (sectionId: number, ip: string, interval: number) => {
-    const intervalId = setInterval(
-      () => fetchCleaningHours(sectionId, ip),
-      interval,
-    );
-    return () => clearInterval(intervalId); // Return a cleanup function
-  };
-
-  // Initialize
   initialize();
 
   return {
     remainingCleaningHours: {},
-    setRemainingCleaningHours: (sectionId, hours) =>
-      set(state => ({
-        remainingCleaningHours: {
-          ...state.remainingCleaningHours,
-          [sectionId]: {
-            ...state.remainingCleaningHours[sectionId],
-            remaining: hours,
-          },
-        },
-      })),
-    resetCleaningHours: sectionId =>
-      set(state => {
-        if (sectionId !== undefined) {
-          const updatedSections = {...state.remainingCleaningHours};
-          delete updatedSections[sectionId];
-          return {remainingCleaningHours: updatedSections};
-        }
-        return {remainingCleaningHours: {}};
-      }),
-    startFetching,
+    isLoading: false,
+    error: null,
+    fetchCleaningHours,
+    startPolling,
+    stopAllPolling,
+    cleanup,
   };
 });
 

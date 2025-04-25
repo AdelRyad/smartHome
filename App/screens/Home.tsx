@@ -16,7 +16,6 @@ import {CheckIcon2, InfoIcon} from '../../icons';
 import CustomSwitch from '../../components/CustomSwitch';
 import {useNavigation, NavigationProp} from '@react-navigation/native';
 import {getSectionsWithStatus, updateSection} from '../../utils/db';
-import {toggleLamp} from '../../utils/modbus';
 import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 import {useStatusStore} from '../../utils/statusStore';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
@@ -77,30 +76,47 @@ const SectionCard = memo(
     onToggleSwitch: (index: number) => void;
     onNavigate: (item: any) => void;
   }) => {
-    const sectionStatus = useStatusStore(
-      state => state.statusBySection[item.id],
+    const statusStore = useStatusStore();
+    const sectionStatuses = useMemo(
+      () => ({
+        dps: statusStore
+          .getSectionStatusSummary('dps')
+          .find(s => s.sectionId === item.id),
+        pressure: statusStore
+          .getSectionStatusSummary('pressure')
+          .find(s => s.sectionId === item.id),
+        cleaning: statusStore
+          .getSectionStatusSummary('cleaning')
+          .find(s => s.sectionId === item.id),
+        lamp: statusStore
+          .getSectionStatusSummary('lamp')
+          .find(s => s.sectionId === item.id),
+      }),
+      [statusStore, item.id],
     );
 
     const status = useMemo(() => {
-      if (!sectionStatus) return 'good';
-
       const statuses: StatusLevel[] = [
-        sectionStatus.dps.status,
-        sectionStatus.pressureButton.status,
-        sectionStatus.cleaning.status,
-        ...Object.values(sectionStatus.lamps).map(l => l.status),
-      ];
+        sectionStatuses.dps?.status,
+        sectionStatuses.pressure?.status,
+        sectionStatuses.cleaning?.status,
+        sectionStatuses.lamp?.status,
+      ].filter(Boolean) as StatusLevel[];
 
-      if (statuses.includes('error')) return 'error';
-      if (statuses.includes('warning')) return 'warning';
+      if (statuses.includes('error')) {
+        return 'error';
+      }
+      if (statuses.includes('warning')) {
+        return 'warning';
+      }
       return 'good';
-    }, [sectionStatus]);
+    }, [sectionStatuses]);
 
     const connected = item.connected;
 
     return (
       <TouchableOpacity
-        style={[styles.gridItem, {flex: 1}]}
+        style={styles.gridItemContainer}
         onPress={() => onNavigate(item)}
         disabled={!connected || loading}>
         <View style={sectionCard(status, connected)}>
@@ -152,13 +168,13 @@ const Home = () => {
   const [allSectionsWorking, setAllSectionsWorking] = useState(false);
 
   const powerStatusStore = useSectionsPowerStatusStore();
-  const {getSectionStatusSummary} = useStatusStore();
+  const statusStore = useStatusStore();
 
   const {errorCount, warningCount} = useMemo(() => {
-    const dpsSummary = getSectionStatusSummary('dps');
-    const lampSummary = getSectionStatusSummary('lamp');
-    const pressureSummary = getSectionStatusSummary('pressure');
-    const cleaningSummary = getSectionStatusSummary('cleaning');
+    const dpsSummary = statusStore.getSectionStatusSummary('dps');
+    const lampSummary = statusStore.getSectionStatusSummary('lamp');
+    const pressureSummary = statusStore.getSectionStatusSummary('pressure');
+    const cleaningSummary = statusStore.getSectionStatusSummary('cleaning');
 
     return {
       errorCount: [
@@ -174,7 +190,7 @@ const Home = () => {
         ...cleaningSummary,
       ].filter(item => item.status === 'warning').length,
     };
-  }, [getSectionStatusSummary]);
+  }, [statusStore]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -218,13 +234,19 @@ const Home = () => {
         return;
       }
       setLoading(true);
-      const desiredState = !powerStatusStore.powerStatus[section.id];
-
-      powerStatusStore.setPowerStatus(section.id, desiredState);
+      const currentStatus =
+        powerStatusStore.sections[section.id]?.isPowered ?? false;
+      const desiredState = !currentStatus;
 
       try {
-        await toggleLamp(section.ip!, 502, desiredState);
+        // Update power status first
+        await powerStatusStore.setPowerStatus(
+          section.id,
+          section.ip,
+          desiredState,
+        );
 
+        // Update database
         await new Promise<void>((resolve, reject) => {
           updateSection(
             section.id,
@@ -232,7 +254,7 @@ const Home = () => {
             section.ip!,
             section.cleaningDays,
             desiredState,
-            success => {
+            (success: boolean) => {
               if (success) {
                 resolve();
               } else {
@@ -241,9 +263,8 @@ const Home = () => {
             },
           );
         });
-      } catch (error: any) {
+      } catch (error) {
         console.error('Error toggling switch:', error);
-        powerStatusStore.setPowerStatus(section.id, !desiredState);
       } finally {
         setLoading(false);
       }
@@ -263,50 +284,55 @@ const Home = () => {
         return;
       }
 
-      const modbusResults = await Promise.allSettled(
-        connectedSections.map(section => {
-          return toggleLamp(section.ip!, 502, newStatus);
-        }),
-      );
+      try {
+        // Update power status for all sections
+        await Promise.all(
+          connectedSections.map(section =>
+            powerStatusStore.setPowerStatus(section.id, section.ip!, newStatus),
+          ),
+        );
 
-      modbusResults.forEach((result, index) => {
-        if (result.status === 'rejected') {
-          console.error(
-            `Failed to toggle section ${connectedSections[index].id}:`,
-            result.reason,
-          );
-        }
-      });
+        // Update database for all sections
+        await Promise.all(
+          connectedSections.map(
+            section =>
+              new Promise<void>(resolve => {
+                updateSection(
+                  section.id,
+                  section.name,
+                  section.ip!,
+                  section.cleaningDays,
+                  newStatus,
+                  (success: boolean) => {
+                    if (!success) {
+                      console.error(
+                        `Failed to update DB for section ${section.id}`,
+                      );
+                    }
+                    resolve();
+                  },
+                );
+              }),
+          ),
+        );
 
-      const dbUpdatePromises = connectedSections.map(section => {
-        return new Promise<void>(resolve => {
-          updateSection(
-            section.id,
-            section.name,
-            section.ip!,
-            section.cleaningDays,
-            newStatus,
-            success => {
-              if (!success) {
-                console.error(`Failed to update DB for section ${section.id}`);
-              }
-              resolve();
-            },
-          );
-        });
-      });
-      await Promise.all(dbUpdatePromises);
-
-      const finalSectionsState = sections.map(section => ({
-        ...section,
-        working: section.connected && section.ip ? newStatus : section.working,
-      }));
-      setSections(finalSectionsState);
-      setAllSectionsWorking(newStatus);
-
-      setLoading(false);
+        // Update local state
+        const finalSectionsState = sections.map(section => ({
+          ...section,
+          working:
+            section.connected && section.ip ? newStatus : section.working,
+        }));
+        setSections(finalSectionsState);
+        setAllSectionsWorking(newStatus);
+      } catch (error) {
+        console.error('Error toggling all sections:', error);
+        // On error, refresh section states
+        fetchData();
+      } finally {
+        setLoading(false);
+      }
     },
-    [sections],
+    [sections, powerStatusStore, fetchData],
   );
 
   const handleNavigate = useCallback(
@@ -331,12 +357,12 @@ const Home = () => {
         item={item}
         index={index}
         loading={loading}
-        powerStatus={powerStatusStore.powerStatus[item.id] ?? false}
+        powerStatus={powerStatusStore.sections[item.id]?.isPowered ?? false}
         onToggleSwitch={handleToggleSwitch}
         onNavigate={handleNavigate}
       />
     ),
-    [loading, powerStatusStore.powerStatus, handleToggleSwitch, handleNavigate],
+    [loading, powerStatusStore.sections, handleToggleSwitch, handleNavigate],
   );
 
   return (
@@ -372,7 +398,7 @@ const Home = () => {
           contentContainerStyle={styles.gridContentContainer}
           showsVerticalScrollIndicator={false}
           scrollEnabled={!loading}
-          extraData={[loading, powerStatusStore.powerStatus]}
+          extraData={[loading, powerStatusStore.sections]}
           initialNumToRender={8}
           maxToRenderPerBatch={8}
           windowSize={5}
@@ -439,6 +465,9 @@ const styles = StyleSheet.create({
     paddingBottom: 80,
   },
   gridItem: {
+    flex: 1,
+  },
+  gridItemContainer: {
     flex: 1,
   },
   gridColumnWrapper: {

@@ -2,84 +2,145 @@ import {create} from 'zustand';
 import {readDPS} from './modbus';
 import {getSectionsWithStatus} from './db';
 
-interface DpsPressureState {
-  dpsPressureStatus: Record<number, boolean | null>; // Section ID -> DPS Status
-  setDpsPressureStatus: (sectionId: number, status: boolean | null) => void;
-  resetDpsPressureStatus: () => void;
-  startFetching: (
+interface DPSState {
+  sections: Record<
+    number,
+    {
+      isOk: boolean | null;
+      lastUpdated: number;
+      error: string | null;
+    }
+  >;
+  isLoading: boolean;
+  error: string | null;
+  startPolling: (
     sectionId: number,
     ip: string,
-    interval: number,
+    interval?: number,
   ) => () => void;
+  stopPolling: (sectionId: number) => void;
+  cleanup: () => void;
 }
 
-const useDpsPressureStore = create<DpsPressureState>(set => {
-  const fetchDpsPressure = async (sectionId: number, ip: string) => {
+const POLLING_INTERVAL = 5000; // 5 seconds
+
+const useDpsPressureStore = create<DPSState>((set, get) => {
+  const pollingIntervals: Record<number, NodeJS.Timeout> = {};
+
+  const fetchDpsStatus = async (sectionId: number, ip: string) => {
+    if (!ip) return;
+
     try {
-      const setStatus = (msg: string) => {
-        console.log(`[DPS Status] Section ${sectionId}: ${msg}`);
-      };
-      const setDpsStatus = (isOk: boolean | null) => {
-        set(state => ({
-          dpsPressureStatus: {
-            ...state.dpsPressureStatus,
-            [sectionId]: isOk,
+      set(state => ({
+        sections: {
+          ...state.sections,
+          [sectionId]: {
+            ...(state.sections[sectionId] || {}),
+            error: null,
           },
-        }));
-      };
-      readDPS(ip, 502, setStatus, setDpsStatus);
+        },
+        isLoading: true,
+        error: null,
+      }));
+
+      const dpsStatus = await new Promise<boolean | null>(resolve => {
+        readDPS(ip, 502, () => {}, resolve);
+      });
+
+      set(state => ({
+        sections: {
+          ...state.sections,
+          [sectionId]: {
+            isOk: dpsStatus,
+            lastUpdated: Date.now(),
+            error: null,
+          },
+        },
+        isLoading: false,
+      }));
     } catch (error) {
       console.error(
-        `Error fetching DPS pressure for Section ${sectionId}:`,
+        `Error fetching DPS status for section ${sectionId}:`,
         error,
       );
+
       set(state => ({
-        dpsPressureStatus: {
-          ...state.dpsPressureStatus,
-          [sectionId]: null,
+        sections: {
+          ...state.sections,
+          [sectionId]: {
+            ...(state.sections[sectionId] || {}),
+            error: error instanceof Error ? error.message : String(error),
+            lastUpdated: Date.now(),
+          },
         },
+        isLoading: false,
+        error: `Failed to fetch DPS status: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       }));
     }
   };
 
-  const fetchAllSectionsData = async () => {
+  const startPolling = (
+    sectionId: number,
+    ip: string,
+    interval = POLLING_INTERVAL,
+  ) => {
+    stopPolling(sectionId);
+
+    // Initial fetch
+    fetchDpsStatus(sectionId, ip);
+
+    // Set up polling
+    pollingIntervals[sectionId] = setInterval(() => {
+      fetchDpsStatus(sectionId, ip);
+    }, interval);
+
+    return () => stopPolling(sectionId);
+  };
+
+  const stopPolling = (sectionId: number) => {
+    if (pollingIntervals[sectionId]) {
+      clearInterval(pollingIntervals[sectionId]);
+      delete pollingIntervals[sectionId];
+    }
+  };
+
+  const cleanup = () => {
+    Object.keys(pollingIntervals).forEach(sectionId => {
+      stopPolling(Number(sectionId));
+    });
+  };
+  const initialize = async () => {
+    cleanup();
+
     try {
       const sections = await new Promise<any[]>(resolve => {
         getSectionsWithStatus(resolve);
       });
-      for (const section of sections) {
-        if (section.ip) {
-          fetchDpsPressure(section.id, section.ip);
-        }
+
+      if (!sections || !Array.isArray(sections)) {
+        throw new Error('Invalid sections data received');
       }
+
+      sections.forEach(section => {
+        if (section?.id && section?.ip) {
+          startPolling(section.id, section.ip);
+        }
+      });
     } catch (error) {
-      console.error('Error fetching all DPS pressure data:', error);
+      console.error('Error initializing DPS status:', error);
     }
   };
-
-  const startFetching = (sectionId: number, ip: string, interval: number) => {
-    fetchDpsPressure(sectionId, ip);
-    const intervalId = setInterval(
-      () => fetchDpsPressure(sectionId, ip),
-      interval,
-    );
-    return () => clearInterval(intervalId);
-  };
-
-  fetchAllSectionsData();
-  setInterval(fetchAllSectionsData, 5 * 1000);
+  initialize();
 
   return {
-    dpsPressureStatus: {},
-    setDpsPressureStatus: (sectionId, status) =>
-      set(state => ({
-        dpsPressureStatus: {
-          ...state.dpsPressureStatus,
-          [sectionId]: status,
-        },
-      })),
-    resetDpsPressureStatus: () => set({dpsPressureStatus: {}}),
-    startFetching,
+    sections: {},
+    isLoading: false,
+    error: null,
+    startPolling,
+    stopPolling,
+    cleanup,
   };
 });
 
