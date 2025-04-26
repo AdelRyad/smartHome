@@ -2,6 +2,7 @@ import {create} from 'zustand';
 import {readLampHours, readLifeHoursSetpoint} from './modbus';
 import {getSectionsWithStatus, getDevicesForSection} from './db';
 import {AppState} from 'react-native';
+import modbusConnectionManager from './modbusConnectionManager';
 
 interface LampHoursData {
   currentHours: number | null;
@@ -58,6 +59,24 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, _get) => {
     ip: string,
     retryCount = 0,
   ) => {
+    if (modbusConnectionManager.isSuspended(ip, 502)) {
+      console.log(
+        `[WorkingHours] Skipping fetch for suspended section ${sectionId} (${ip})`,
+      );
+      set(state => ({
+        workingHours: {
+          ...state.workingHours,
+          [sectionId]: {
+            ...state.workingHours[sectionId],
+            error: 'Polling suspended due to repeated connection failures.',
+            lastUpdated: Date.now(),
+          },
+        },
+        isLoading: false,
+      }));
+      return;
+    }
+
     // Always fetch the latest IP for this section before polling
     const sections = await new Promise<any[]>(resolve =>
       getSectionsWithStatus(resolve),

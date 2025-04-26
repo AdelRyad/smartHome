@@ -2,6 +2,7 @@ import {create} from 'zustand';
 import {readPressureButton} from './modbus';
 import {getSectionsWithStatus} from './db';
 import {AppState} from 'react-native';
+import modbusConnectionManager from './modbusConnectionManager';
 
 interface PressureButtonState {
   sections: Record<
@@ -23,7 +24,7 @@ interface PressureButtonState {
   cleanup: () => void;
 }
 
-const ACTIVE_POLLING_INTERVAL = 3000; // 3 seconds - more frequent for button state
+const ACTIVE_POLLING_INTERVAL = 20000; // 20 seconds - match other polling intervals
 const MAX_QUEUE_SIZE = 30; // Smaller queue size since updates are more frequent
 
 const GLOBAL_POLLING_REGISTRY: Record<string, NodeJS.Timeout> = {};
@@ -52,7 +53,9 @@ const usePressureButtonStore = create<PressureButtonState>((set, _get) => {
   }
 
   const processQueue = async () => {
-    if (isProcessing || requestQueue.length === 0) return;
+    if (isProcessing || requestQueue.length === 0) {
+      return;
+    }
 
     isProcessing = true;
 
@@ -62,7 +65,9 @@ const usePressureButtonStore = create<PressureButtonState>((set, _get) => {
       const now = Date.now();
       requestQueue = requestQueue.filter(req => now - req.timestamp < 5000); // Drop requests older than 5s
 
-      if (requestQueue.length === 0) return;
+      if (requestQueue.length === 0) {
+        return;
+      }
 
       const {sectionId, ip} = requestQueue.shift()!;
       if (!activeRequests[sectionId]) {
@@ -77,13 +82,33 @@ const usePressureButtonStore = create<PressureButtonState>((set, _get) => {
   };
 
   const fetchButtonStatus = async (sectionId: number, ip: string) => {
+    if (modbusConnectionManager.isSuspended(ip, 502)) {
+      console.log(
+        `[PressureButton] Skipping fetch for suspended section ${sectionId} (${ip})`,
+      );
+      set(state => ({
+        sections: {
+          ...state.sections,
+          [sectionId]: {
+            ...(state.sections[sectionId] || {}),
+            error: 'Polling suspended due to repeated connection failures.',
+            lastUpdated: Date.now(),
+          },
+        },
+        isLoading: false,
+      }));
+      return;
+    }
+
     // Always fetch the latest IP for this section before polling
     const sections = await new Promise<any[]>(resolve =>
       getSectionsWithStatus(resolve),
     );
     const section = sections.find(s => s.id === sectionId);
     const currentIp = section?.ip || ip;
-    if (!currentIp || activeRequests[sectionId]) return;
+    if (!currentIp || activeRequests[sectionId]) {
+      return;
+    }
 
     activeRequests[sectionId] = true;
     const startTime = Date.now();

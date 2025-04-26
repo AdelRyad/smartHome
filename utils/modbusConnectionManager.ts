@@ -30,6 +30,21 @@ class ModbusConnectionManager {
   private connections: Map<string, ConnectionState> = new Map();
   private suspendedConnections: Set<string> = new Set();
 
+  // Add event listeners for errors
+  private errorListeners: Array<
+    (ip: string, port: number, err: Error) => void
+  > = [];
+
+  public onError(listener: (ip: string, port: number, err: Error) => void) {
+    this.errorListeners.push(listener);
+  }
+
+  private emitError(ip: string, port: number, err: Error) {
+    for (const listener of this.errorListeners) {
+      listener(ip, port, err);
+    }
+  }
+
   private getKey(ip: string, port: number) {
     return `${ip}:${port}`;
   }
@@ -67,6 +82,10 @@ class ModbusConnectionManager {
       this.log(`Resumed connection to ${ip}:${port}`);
       this.createConnection(ip, port);
     }
+  }
+
+  public isSuspended(ip: string, port: number): boolean {
+    return this.suspendedConnections.has(this.getKey(ip, port));
   }
 
   private createConnection(ip: string, port: number) {
@@ -127,6 +146,7 @@ class ModbusConnectionManager {
 
   private handleDisconnect(state: ConnectionState, err: Error) {
     const key = this.getKey(state.ip, state.port);
+    this.emitError(state.ip, state.port, err); // Notify listeners of error
     if (this.suspendedConnections.has(key)) {
       this.log(
         `Connection to ${state.ip}:${state.port} is suspended, skipping disconnect/reconnect logic.`,
@@ -180,6 +200,13 @@ class ModbusConnectionManager {
       this.log(
         `Connection to ${state.ip}:${state.port} is suspended, skipping scheduleReconnect.`,
       );
+      return;
+    }
+    if (state.reconnectAttempts >= 5) {
+      this.log(
+        `Too many reconnect attempts for ${state.ip}:${state.port}, suspending connection.`,
+      );
+      this.suspendConnection(state.ip, state.port);
       return;
     }
     if (state.reconnectTimeout) return;

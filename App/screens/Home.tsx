@@ -155,28 +155,16 @@ const SectionCard = memo(
               disabled={!connected || loading}
             />
           </View>
-          {/* Show reconnect button and error if polling stopped */}
-          {pollingStopped && (
-            <View style={{marginTop: 12, alignItems: 'center'}}>
-              <Text
-                style={{
-                  color: COLORS.error[700],
-                  marginBottom: 8,
-                  textAlign: 'center',
-                }}>
+          {/* Only show reconnect button if connection error exists AND section has an IP */}
+          {connectionError && item.ip && (
+            <View style={styles.reconnectContainer}>
+              <Text style={styles.reconnectErrorText}>
                 {connectionError.message}
               </Text>
               <TouchableOpacity
-                style={{
-                  backgroundColor: COLORS.good[500],
-                  paddingHorizontal: 20,
-                  paddingVertical: 8,
-                  borderRadius: 20,
-                }}
+                style={styles.reconnectButton}
                 onPress={handleReconnect}>
-                <Text style={{color: '#fff', fontWeight: 'bold'}}>
-                  Reconnect
-                </Text>
+                <Text style={styles.reconnectButtonText}>Reconnect</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -568,6 +556,25 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 10,
+  },
+  reconnectContainer: {
+    marginTop: 12,
+    alignItems: 'center',
+  },
+  reconnectErrorText: {
+    color: COLORS.error[700],
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  reconnectButton: {
+    backgroundColor: COLORS.good[500],
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  reconnectButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
   },
 });
 

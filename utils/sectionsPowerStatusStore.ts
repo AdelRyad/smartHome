@@ -2,6 +2,7 @@ import {create} from 'zustand';
 import {readPowerStatus, toggleLamp} from './modbus';
 import {getSectionsWithStatus} from './db';
 import {AppState} from 'react-native';
+import modbusConnectionManager from './modbusConnectionManager';
 
 interface PowerStatusState {
   sections: Record<
@@ -34,7 +35,7 @@ const RETRY_DELAY = 1000; // 1 second initial delay
 const MAX_QUEUE_SIZE = 50;
 const REQUEST_TIMEOUT = 5000; // 5 second timeout
 
-const useSectionsPowerStatusStore = create<PowerStatusState>((set, get) => {
+const useSectionsPowerStatusStore = create<PowerStatusState>((set, _get) => {
   let pollingIntervals: Record<number, NodeJS.Timeout> = {};
   let activeRequests: Record<number, boolean> = {};
   let requestQueue: Array<{sectionId: number; ip: string; timestamp: number}> =
@@ -45,7 +46,9 @@ const useSectionsPowerStatusStore = create<PowerStatusState>((set, get) => {
     null;
 
   const processQueue = async () => {
-    if (isProcessing || requestQueue.length === 0) return;
+    if (isProcessing || requestQueue.length === 0) {
+      return;
+    }
 
     isProcessing = true;
 
@@ -55,7 +58,9 @@ const useSectionsPowerStatusStore = create<PowerStatusState>((set, get) => {
       const now = Date.now();
       requestQueue = requestQueue.filter(req => now - req.timestamp < 15000); // Drop old requests
 
-      if (requestQueue.length === 0) return;
+      if (requestQueue.length === 0) {
+        return;
+      }
 
       const {sectionId, ip} = requestQueue.shift()!;
 
@@ -81,7 +86,27 @@ const useSectionsPowerStatusStore = create<PowerStatusState>((set, get) => {
     ip: string,
     retryCount = 0,
   ) => {
-    if (!ip || activeRequests[sectionId]) return;
+    if (modbusConnectionManager.isSuspended(ip, 502)) {
+      console.log(
+        `[PowerStatus] Skipping fetch for suspended section ${sectionId} (${ip})`,
+      );
+      set(state => ({
+        sections: {
+          ...state.sections,
+          [sectionId]: {
+            ...(state.sections[sectionId] || {}),
+            error: 'Polling suspended due to repeated connection failures.',
+            lastUpdated: Date.now(),
+          },
+        },
+        isLoading: false,
+      }));
+      return;
+    }
+
+    if (!ip || activeRequests[sectionId]) {
+      return;
+    }
 
     activeRequests[sectionId] = true;
     const startTime = Date.now();
@@ -172,7 +197,9 @@ const useSectionsPowerStatusStore = create<PowerStatusState>((set, get) => {
     ip: string,
     status: boolean,
   ) => {
-    if (!ip) return;
+    if (!ip) {
+      return;
+    }
 
     try {
       // Optimistically update the UI

@@ -2,6 +2,7 @@ import {create} from 'zustand';
 import {readDPS} from './modbus';
 import {getSectionsWithStatus} from './db';
 import {AppState} from 'react-native';
+import modbusConnectionManager from './modbusConnectionManager';
 
 interface DPSState {
   sections: Record<
@@ -35,13 +36,33 @@ const useDpsPressureStore = create<DPSState>((set, _get) => {
     null;
 
   const fetchDpsStatus = async (sectionId: number, ip: string) => {
+    if (modbusConnectionManager.isSuspended(ip, 502)) {
+      console.log(
+        `[DPS] Skipping fetch for suspended section ${sectionId} (${ip})`,
+      );
+      set(state => ({
+        sections: {
+          ...state.sections,
+          [sectionId]: {
+            ...(state.sections[sectionId] || {}),
+            error: 'Polling suspended due to repeated connection failures.',
+            lastUpdated: Date.now(),
+          },
+        },
+        isLoading: false,
+      }));
+      return;
+    }
+
     // Always fetch the latest IP for this section before polling
     const sections = await new Promise<any[]>(resolve =>
       getSectionsWithStatus(resolve),
     );
     const section = sections.find(s => s.id === sectionId);
     const currentIp = section?.ip || ip;
-    if (!currentIp) return;
+    if (!currentIp) {
+      return;
+    }
 
     try {
       console.log(`[DPS] Fetching for section ${sectionId} (IP: ${currentIp})`);

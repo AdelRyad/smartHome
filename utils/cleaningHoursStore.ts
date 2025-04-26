@@ -5,6 +5,7 @@ import {
 } from './modbus';
 import {getSectionsWithStatus, getDevicesForSection} from './db';
 import {AppState} from 'react-native';
+import modbusConnectionManager from './modbusConnectionManager';
 
 interface CleaningHoursData {
   setpoint: number | null;
@@ -62,13 +63,34 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, _get) => {
     ip: string,
     retryCount = 0,
   ) => {
+    if (modbusConnectionManager.isSuspended(ip, 502)) {
+      console.log(
+        `[CleaningHours] Skipping fetch for suspended section ${sectionId} (${ip})`,
+      );
+      set(state => ({
+        remainingCleaningHours: {
+          ...state.remainingCleaningHours,
+          [sectionId]: {
+            ...(state.remainingCleaningHours[sectionId] || {}),
+            loading: false,
+            error: 'Polling suspended due to repeated connection failures.',
+            lastUpdated: Date.now(),
+          },
+        },
+        isLoading: false,
+      }));
+      return;
+    }
+
     // Always fetch the latest IP for this section before polling
     const sections = await new Promise<any[]>(resolve =>
       getSectionsWithStatus(resolve),
     );
     const section = sections.find(s => s.id === sectionId);
     const currentIp = section?.ip || ip;
-    if (!currentIp) return;
+    if (!currentIp) {
+      return;
+    }
 
     try {
       // Add delay for the first request only
@@ -167,8 +189,8 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, _get) => {
     ip: string,
     interval = POLLING_INTERVAL,
   ) => {
-    const stopPolling = (sectionId: number) => {
-      const key = getPollingKey(sectionId);
+    const stopPolling = (_sectionId: number) => {
+      const key = getPollingKey(_sectionId);
       if (GLOBAL_POLLING_REGISTRY[key]) {
         clearInterval(GLOBAL_POLLING_REGISTRY[key]);
         delete GLOBAL_POLLING_REGISTRY[key];
@@ -241,7 +263,9 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, _get) => {
       });
 
       // Periodically check for new sections every 60 seconds
-      if (sectionDiscoveryInterval) clearInterval(sectionDiscoveryInterval);
+      if (sectionDiscoveryInterval) {
+        clearInterval(sectionDiscoveryInterval);
+      }
       sectionDiscoveryInterval = setInterval(async () => {
         const latestSections = await new Promise<any[]>(resolve => {
           getSectionsWithStatus(resolve);

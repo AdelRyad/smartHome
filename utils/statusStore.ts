@@ -142,6 +142,22 @@ export const useStatusStore = create<StatusState>((set, get) => {
       timestamp: number;
     }> = [];
 
+    const section = get().sections[sectionId];
+    const ip = section?.ip;
+    const port = 502;
+    // Check if Modbus is connected for this section
+    let isConnected = true;
+    if (ip) {
+      const modbusState = modbusConnectionManager.connections?.get?.(
+        `${ip}:${port}`,
+      );
+      isConnected = !!(modbusState && modbusState.isConnected);
+    }
+    // If not connected, count as a failure
+    if (!isConnected) {
+      recordSectionFailure(sectionId);
+    }
+
     // Collect errors from all stores
     if (powerStore.sections[sectionId]?.error) {
       sectionErrors.push({
@@ -234,7 +250,7 @@ export const useStatusStore = create<StatusState>((set, get) => {
     lastSectionStatus[sectionId] = !hasConnectionError;
     if (hasConnectionError) {
       recordSectionFailure(sectionId);
-    } else {
+    } else if (isConnected) {
       resetSectionFailure(sectionId);
     }
   };
@@ -401,6 +417,22 @@ export const useStatusStore = create<StatusState>((set, get) => {
       }
     });
   };
+
+  // Register for Modbus connection errors and count as failures
+  modbusConnectionManager.onError((ip, port, err) => {
+    // Find the sectionId for this ip/port
+    const state = useStatusStore.getState();
+    const sectionEntry = Object.entries(state.sections).find(
+      ([, section]) => section?.ip === ip,
+    );
+    if (sectionEntry) {
+      const sectionId = Number(sectionEntry[0]);
+      // Count as a failure
+      if (typeof state.recordSectionFailure === 'function') {
+        state.recordSectionFailure(sectionId);
+      }
+    }
+  });
 
   // Call initialize immediately
   initialize();
