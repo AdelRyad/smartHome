@@ -5,6 +5,7 @@ import useCleaningHoursStore from './cleaningHoursStore';
 import useDpsPressureStore from './dpsPressureStore';
 import usePressureButtonStore from './pressureButtonStore';
 import {getSectionsWithStatus} from './db';
+import modbusConnectionManager from './modbusConnectionManager';
 
 interface StatusState {
   sections: Record<
@@ -54,6 +55,7 @@ interface StatusState {
     status: StatusLevel;
     message: string;
   }>;
+  reconnectSection: (sectionId: number, ip: string) => void;
 }
 
 export type StatusLevel = 'error' | 'warning' | 'good';
@@ -71,6 +73,60 @@ const ERROR_RETENTION_TIME = 30 * 60 * 1000; // 30 minutes
 export const useStatusStore = create<StatusState>((set, get) => {
   let pollingIntervals: Record<number, NodeJS.Timeout> = {};
   let activeRequests: Record<number, boolean> = {};
+  // --- Failure tracking additions ---
+  let sectionFailureCounts: Record<number, {count: number; stopped: boolean}> =
+    {};
+  let lastSectionStatus: Record<number, boolean> = {};
+
+  // Helper: Reset section failure count
+  function resetSectionFailure(sectionId: number) {
+    sectionFailureCounts[sectionId] = {count: 0, stopped: false};
+  }
+
+  // Helper: Record section failure and check for threshold
+  function recordSectionFailure(sectionId: number) {
+    if (!sectionFailureCounts[sectionId]) {
+      sectionFailureCounts[sectionId] = {count: 0, stopped: false};
+    }
+    sectionFailureCounts[sectionId].count += 1;
+    if (
+      sectionFailureCounts[sectionId].count >= 5 &&
+      !sectionFailureCounts[sectionId].stopped
+    ) {
+      sectionFailureCounts[sectionId].stopped = true;
+      stopPolling(sectionId);
+      const section = get().sections[sectionId];
+      const ip = section?.ip;
+      const port = 502; // default modbus port
+      if (ip) {
+        modbusConnectionManager.suspendConnection(ip, port);
+      }
+      const now = Date.now();
+      set(state => ({
+        sections: {
+          ...state.sections,
+          [sectionId]: {
+            ...state.sections[sectionId],
+            sectionErrors: [
+              ...(state.sections[sectionId]?.sectionErrors || []),
+              {
+                type: 'connection',
+                message: 'Connection failed 5 times. Polling stopped.',
+                timestamp: now,
+              },
+            ],
+          },
+        },
+      }));
+    }
+  }
+
+  // Helper: Reconnect section
+  function reconnectSection(sectionId: number, ip: string) {
+    resetSectionFailure(sectionId);
+    modbusConnectionManager.resumeConnection(ip, 502);
+    startPolling(sectionId, ip);
+  }
 
   const updateSectionStatus = async (sectionId: number) => {
     const powerStore = useSectionsPowerStatusStore.getState();
@@ -170,6 +226,17 @@ export const useStatusStore = create<StatusState>((set, get) => {
         isLoading: false,
       };
     });
+
+    // Determine if section is up (no errors) or down (has connection error)
+    const hasConnectionError = sectionErrors.some(
+      e => e.type === 'connection' || e.type === 'power',
+    );
+    lastSectionStatus[sectionId] = !hasConnectionError;
+    if (hasConnectionError) {
+      recordSectionFailure(sectionId);
+    } else {
+      resetSectionFailure(sectionId);
+    }
   };
 
   const startPolling = (
@@ -311,8 +378,8 @@ export const useStatusStore = create<StatusState>((set, get) => {
   const initialize = async () => {
     let sections: any[] = [];
     cleanup();
-    
-    await new Promise<void>((resolve) => {
+
+    await new Promise<void>(resolve => {
       getSectionsWithStatus((sectionsData: any[]) => {
         sections = sectionsData;
         resolve();
@@ -323,11 +390,13 @@ export const useStatusStore = create<StatusState>((set, get) => {
       if (section?.id && section?.ip) {
         // Start polling in status store
         startPolling(section.id, section.ip);
-        
+
         // Also ensure other stores are polling
         useDpsPressureStore.getState().startPolling(section.id, section.ip);
         usePressureButtonStore.getState().startPolling(section.id, section.ip);
-        useSectionsPowerStatusStore.getState().startPolling(section.id, section.ip);
+        useSectionsPowerStatusStore
+          .getState()
+          .startPolling(section.id, section.ip);
         useWorkingHoursStore.getState().startPolling(section.id, section.ip);
       }
     });
@@ -348,5 +417,6 @@ export const useStatusStore = create<StatusState>((set, get) => {
     getErrorsForSection,
     getAllErrors,
     getSectionStatusSummary,
+    reconnectSection, // Expose for UI
   };
 });

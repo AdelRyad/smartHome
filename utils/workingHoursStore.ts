@@ -1,6 +1,6 @@
 import {create} from 'zustand';
 import {readLampHours, readLifeHoursSetpoint} from './modbus';
-import {getSectionsWithStatus} from './db';
+import {getSectionsWithStatus, getDevicesForSection} from './db';
 import {AppState} from 'react-native';
 
 interface LampHoursData {
@@ -24,46 +24,66 @@ interface WorkingHoursState {
   cleanup: () => void;
 }
 
-const POLLING_INTERVAL = 10000; // 10 seconds
+const POLLING_INTERVAL = 20000; // 20 seconds
 const LAMP_REQUEST_DELAY = 500; // Increased to 500ms between lamp requests
 const INITIAL_DELAY = 2000; // 2 second delay before first request
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
 
-const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
-  const pollingIntervals: Record<number, NodeJS.Timeout> = {};
+const GLOBAL_POLLING_REGISTRY: Record<string, NodeJS.Timeout> = {};
+
+function getPollingKey(sectionId: number) {
+  return `workingHours:${sectionId}`;
+}
+
+const useWorkingHoursStore = create<WorkingHoursState>((set, _get) => {
   let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
     null;
   let isFirstRequest = true;
+
+  async function getSafeInterval(defaultInterval: number) {
+    // @ts-ignore: performance.memory is not standard in all environments
+    if (global && global.performance && global.performance.memory) {
+      // @ts-ignore
+      const {jsHeapSizeLimit, usedJSHeapSize} = global.performance.memory;
+      if (usedJSHeapSize / jsHeapSizeLimit > 0.8) {
+        return defaultInterval * 2;
+      }
+    }
+    return defaultInterval;
+  }
 
   const fetchWorkingHours = async (
     sectionId: number,
     ip: string,
     retryCount = 0,
   ) => {
-    if (!ip) return;
+    // Always fetch the latest IP for this section before polling
+    const sections = await new Promise<any[]>(resolve =>
+      getSectionsWithStatus(resolve),
+    );
+    const section = sections.find(s => s.id === sectionId);
+    const currentIp = section?.ip || ip;
+
+    if (!currentIp) {
+      return;
+    }
 
     try {
-      // Add delay for the first request only
       if (isFirstRequest) {
         await new Promise(resolve => setTimeout(resolve, INITIAL_DELAY));
         isFirstRequest = false;
       }
+
+      console.log(
+        `[WorkingHours] Fetching for section ${sectionId} (IP: ${currentIp})`,
+      );
 
       set(state => ({
         workingHours: {
           ...state.workingHours,
           [sectionId]: {
             ...state.workingHours[sectionId],
-            ...Object.fromEntries(
-              [1, 2, 3, 4].map(lampId => [
-                lampId,
-                {
-                  ...(state.workingHours[sectionId]?.[lampId] || {}),
-                  error: null,
-                },
-              ]),
-            ),
           },
         },
         isLoading: true,
@@ -72,17 +92,25 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
 
       let maxHours = null;
       try {
-        maxHours = await readLifeHoursSetpoint(ip, 502);
+        maxHours = await readLifeHoursSetpoint(currentIp, 502);
+        console.log(`Max hours setpoint for section ${sectionId}: ${maxHours}`);
       } catch (error) {
         console.warn(`Failed to read life hours setpoint: ${error}`);
       }
 
+      // Fetch device IDs for this section
+      const devices = await new Promise<any[]>(resolve =>
+        getDevicesForSection(sectionId, resolve),
+      );
       const updatedWorkingHours: Record<number, LampHoursData> = {};
 
-      for (const lampId of [1, 2, 3, 4]) {
+      for (let i = 0; i < 4; i++) {
+        const device = devices[i];
+        const lampIndex = i + 1;
+
         try {
-          const result = await readLampHours(ip, 502, lampId);
-          updatedWorkingHours[lampId] = {
+          const result = await readLampHours(currentIp, 502, lampIndex);
+          updatedWorkingHours[device.id] = {
             currentHours: result.currentHours,
             maxHours,
             error: null,
@@ -92,31 +120,30 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
           const errorMessage =
             error instanceof Error ? error.message : String(error);
 
-          // Only retry on connection errors
           if (
             errorMessage.includes('Socket closed') ||
             errorMessage.includes('timeout')
           ) {
             if (retryCount < MAX_RETRIES) {
               console.log(
-                `[Working Hours] Retrying fetch for lamp ${lampId} (attempt ${
-                  retryCount + 1
-                }/${MAX_RETRIES})...`,
+                `[Working Hours] Retrying fetch for lamp ${
+                  device.id
+                } (attempt ${retryCount + 1}/${MAX_RETRIES})...`,
               );
               await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-              return fetchWorkingHours(sectionId, ip, retryCount + 1);
+              return fetchWorkingHours(sectionId, currentIp, retryCount + 1);
             }
           }
 
           if (error.message?.includes('Modbus Exception 4')) {
-            updatedWorkingHours[lampId] = {
+            updatedWorkingHours[device.id] = {
               currentHours: null,
               maxHours,
               error: 'Device failure - lamp may be offline',
               lastUpdated: Date.now(),
             };
           } else {
-            updatedWorkingHours[lampId] = {
+            updatedWorkingHours[device.id] = {
               currentHours: null,
               maxHours,
               error: errorMessage,
@@ -124,11 +151,8 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
             };
           }
         }
-
         // Always wait between lamp requests, even if there was an error
-        if (lampId < 4) {
-          await new Promise(resolve => setTimeout(resolve, LAMP_REQUEST_DELAY));
-        }
+        await new Promise(resolve => setTimeout(resolve, LAMP_REQUEST_DELAY));
       }
 
       set(state => ({
@@ -148,7 +172,6 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
 
-      // Retry on connection errors
       if (
         (errorMessage.includes('Socket closed') ||
           errorMessage.includes('timeout')) &&
@@ -160,7 +183,7 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
           }/${MAX_RETRIES})...`,
         );
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-        return fetchWorkingHours(sectionId, ip, retryCount + 1);
+        return fetchWorkingHours(sectionId, currentIp, retryCount + 1);
       }
 
       set({
@@ -171,9 +194,10 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
   };
 
   const stopPolling = (sectionId: number) => {
-    if (pollingIntervals[sectionId]) {
-      clearInterval(pollingIntervals[sectionId]);
-      delete pollingIntervals[sectionId];
+    const key = getPollingKey(sectionId);
+    if (GLOBAL_POLLING_REGISTRY[key]) {
+      clearInterval(GLOBAL_POLLING_REGISTRY[key]);
+      delete GLOBAL_POLLING_REGISTRY[key];
     }
   };
 
@@ -183,20 +207,23 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
     interval = POLLING_INTERVAL,
   ) => {
     stopPolling(sectionId);
-
     fetchWorkingHours(sectionId, ip);
-
-    pollingIntervals[sectionId] = setInterval(() => {
-      fetchWorkingHours(sectionId, ip);
-    }, interval);
-
+    getSafeInterval(interval).then(safeInterval => {
+      const key = getPollingKey(sectionId);
+      GLOBAL_POLLING_REGISTRY[key] = setInterval(() => {
+        fetchWorkingHours(sectionId, ip);
+      }, safeInterval);
+    });
     return () => stopPolling(sectionId);
   };
 
   const stopAllPolling = () => {
-    Object.keys(pollingIntervals).forEach(sectionId => {
-      stopPolling(Number(sectionId));
-    });
+    Object.keys(GLOBAL_POLLING_REGISTRY)
+      .filter(key => key.startsWith('workingHours:'))
+      .forEach(key => {
+        clearInterval(GLOBAL_POLLING_REGISTRY[key]);
+        delete GLOBAL_POLLING_REGISTRY[key];
+      });
   };
 
   const cleanup = () => {
@@ -218,6 +245,11 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, get) => {
       if (!sections || !Array.isArray(sections)) {
         throw new Error('Invalid sections data received');
       }
+
+      console.log(
+        '[Polling Init] Sections:',
+        sections.map(s => ({id: s.id, ip: s.ip})),
+      );
 
       sections.forEach(section => {
         if (section?.id && section?.ip) {

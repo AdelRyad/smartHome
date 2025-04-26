@@ -1,5 +1,6 @@
-import TcpSocket from 'react-native-tcp-socket';
-import {Buffer} from 'buffer'; // Make sure to import Buffer
+// import TcpSocket from 'react-native-tcp-socket';
+import {Buffer} from 'buffer';
+import modbusConnectionManager from './modbusConnectionManager';
 
 // --- Define Shared Types ---
 interface LampHours {
@@ -87,92 +88,16 @@ const createModbusRequest = (
 
   return Buffer.concat([mbapHeader, pdu]);
 };
-
 /**
  * Helper function to send a Modbus request and return a Promise resolving with the response Buffer.
- * Includes basic timeout and exception handling.
+ * Now uses the persistent ModbusConnectionManager for robust connection handling.
  */
 const sendModbusRequest = (
   ip: string,
   port: number,
   request: Buffer,
 ): Promise<Buffer> => {
-  return new Promise((resolve, reject) => {
-    const client = TcpSocket.createConnection({host: ip, port}, () => {
-      console.log(
-        `[sendModbusRequest] Raw Request: ${request.toString('hex')}`,
-      );
-      client.write(
-        new Uint8Array(request.buffer, request.byteOffset, request.byteLength),
-      );
-    });
-
-    let responseBuffer = Buffer.alloc(0);
-    let requestTimeout: NodeJS.Timeout | null = null;
-
-    const cleanup = (error?: Error) => {
-      if (requestTimeout) {
-        clearTimeout(requestTimeout);
-        requestTimeout = null;
-      }
-      if (!client.destroyed) {
-        client.destroy();
-      }
-      if (error) {
-        console.error(`[sendModbusRequest Error] ${error.message || error}`);
-        reject(error); // Reject the promise on error
-      }
-    };
-
-    requestTimeout = setTimeout(() => {
-      cleanup(new Error('Modbus request timed out'));
-    }, 5000); // 5 second timeout
-
-    client.on('data', data => {
-      const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-      responseBuffer = Buffer.concat([responseBuffer, dataBuffer]);
-      console.log(
-        `[sendModbusRequest] Raw Response: ${responseBuffer.toString('hex')}`,
-      );
-
-      if (responseBuffer.length >= 6) {
-        // Minimum MBAP header length
-        const expectedLengthMBAP = responseBuffer.readUInt16BE(4);
-        const totalExpectedLength = 6 + expectedLengthMBAP; // Correct total length
-
-        if (responseBuffer.length >= totalExpectedLength) {
-          // Check for Modbus Exception Response
-          if (responseBuffer.length >= 8 && responseBuffer[7] & 0x80) {
-            const functionCode = responseBuffer[7] & 0x7f;
-            const exceptionCode = responseBuffer[8];
-            console.error(
-              `[sendModbusRequest] Modbus Exception ${exceptionCode} for function ${functionCode}`,
-            );
-            cleanup(
-              new Error(
-                `Modbus Exception ${exceptionCode} for function ${functionCode}`,
-              ),
-            );
-          } else {
-            // Success!
-            cleanup(); // Clear timeout, close client
-            resolve(responseBuffer); // Resolve the promise with the data
-          }
-        }
-        // Else: Wait for more data or timeout
-      }
-    });
-
-    client.on('error', error => {
-      cleanup(new Error(`Connection error: ${error.message || error}`));
-    });
-
-    client.on('close', () => {
-      if (requestTimeout) {
-        cleanup(new Error('Modbus connection closed unexpectedly'));
-      }
-    });
-  });
+  return modbusConnectionManager.sendRequest(ip, port, request);
 };
 
 // --- General Functions ---

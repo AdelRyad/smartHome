@@ -114,12 +114,25 @@ const SectionCard = memo(
 
     const connected = item.connected;
 
+    // --- New logic for connection failure ---
+    const sectionErrors = statusStore.getErrorsForSection(item.id);
+    const connectionError = sectionErrors.find(e => e.type === 'connection');
+    const pollingStopped = !!connectionError;
+    const canNavigate = connected && !pollingStopped && !loading;
+
+    const handleReconnect = () => {
+      if (item.ip) {
+        statusStore.reconnectSection(item.id, item.ip);
+      }
+    };
+    // ---
+
     return (
-      <TouchableOpacity
-        style={styles.gridItemContainer}
-        onPress={() => onNavigate(item)}
-        disabled={!connected || loading}>
-        <View style={sectionCard(status, connected)}>
+      <View style={styles.gridItemContainer}>
+        <TouchableOpacity
+          style={sectionCard(status, connected)}
+          onPress={() => canNavigate && onNavigate(item)}
+          disabled={!canNavigate}>
           <View style={styles.sectionHeader}>
             <Text style={cardText(status, connected)}>
               {connected ? status : 'disconnected'}
@@ -142,8 +155,33 @@ const SectionCard = memo(
               disabled={!connected || loading}
             />
           </View>
-        </View>
-      </TouchableOpacity>
+          {/* Show reconnect button and error if polling stopped */}
+          {pollingStopped && (
+            <View style={{marginTop: 12, alignItems: 'center'}}>
+              <Text
+                style={{
+                  color: COLORS.error[700],
+                  marginBottom: 8,
+                  textAlign: 'center',
+                }}>
+                {connectionError.message}
+              </Text>
+              <TouchableOpacity
+                style={{
+                  backgroundColor: COLORS.good[500],
+                  paddingHorizontal: 20,
+                  paddingVertical: 8,
+                  borderRadius: 20,
+                }}
+                onPress={handleReconnect}>
+                <Text style={{color: '#fff', fontWeight: 'bold'}}>
+                  Reconnect
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </TouchableOpacity>
+      </View>
     );
   },
 );

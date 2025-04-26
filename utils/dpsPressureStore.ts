@@ -1,6 +1,7 @@
 import {create} from 'zustand';
 import {readDPS} from './modbus';
 import {getSectionsWithStatus} from './db';
+import {AppState} from 'react-native';
 
 interface DPSState {
   sections: Record<
@@ -22,15 +23,28 @@ interface DPSState {
   cleanup: () => void;
 }
 
-const POLLING_INTERVAL = 5000; // 5 seconds
+const POLLING_INTERVAL = 20000; // 20 seconds
 
-const useDpsPressureStore = create<DPSState>((set, get) => {
-  const pollingIntervals: Record<number, NodeJS.Timeout> = {};
+const GLOBAL_POLLING_REGISTRY: Record<string, NodeJS.Timeout> = {};
+function getPollingKey(sectionId: number) {
+  return `dpsPressure:${sectionId}`;
+}
+
+const useDpsPressureStore = create<DPSState>((set, _get) => {
+  let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
+    null;
 
   const fetchDpsStatus = async (sectionId: number, ip: string) => {
-    if (!ip) return;
+    // Always fetch the latest IP for this section before polling
+    const sections = await new Promise<any[]>(resolve =>
+      getSectionsWithStatus(resolve),
+    );
+    const section = sections.find(s => s.id === sectionId);
+    const currentIp = section?.ip || ip;
+    if (!currentIp) return;
 
     try {
+      console.log(`[DPS] Fetching for section ${sectionId} (IP: ${currentIp})`);
       set(state => ({
         sections: {
           ...state.sections,
@@ -44,7 +58,7 @@ const useDpsPressureStore = create<DPSState>((set, get) => {
       }));
 
       const dpsStatus = await new Promise<boolean | null>(resolve => {
-        readDPS(ip, 502, () => {}, resolve);
+        readDPS(currentIp, 502, () => {}, resolve);
       });
 
       set(state => ({
@@ -63,7 +77,7 @@ const useDpsPressureStore = create<DPSState>((set, get) => {
         `Error fetching DPS status for section ${sectionId}:`,
         error,
       );
-
+      // Do NOT overwrite the old value on error
       set(state => ({
         sections: {
           ...state.sections,
@@ -81,36 +95,55 @@ const useDpsPressureStore = create<DPSState>((set, get) => {
     }
   };
 
+  async function getSafeInterval(defaultInterval: number) {
+    // @ts-ignore: performance.memory is not standard in all environments
+    if (global && global.performance && global.performance.memory) {
+      // @ts-ignore
+      const {jsHeapSizeLimit, usedJSHeapSize} = global.performance.memory;
+      if (usedJSHeapSize / jsHeapSizeLimit > 0.8) {
+        return defaultInterval * 2;
+      }
+    }
+    return defaultInterval;
+  }
+
+  const stopPolling = (sectionId: number) => {
+    const key = getPollingKey(sectionId);
+    if (GLOBAL_POLLING_REGISTRY[key]) {
+      clearInterval(GLOBAL_POLLING_REGISTRY[key]);
+      delete GLOBAL_POLLING_REGISTRY[key];
+    }
+  };
+
   const startPolling = (
     sectionId: number,
     ip: string,
     interval = POLLING_INTERVAL,
   ) => {
     stopPolling(sectionId);
-
-    // Initial fetch
+    getSafeInterval(interval).then(safeInterval => {
+      const key = getPollingKey(sectionId);
+      GLOBAL_POLLING_REGISTRY[key] = setInterval(() => {
+        fetchDpsStatus(sectionId, ip);
+      }, safeInterval);
+    });
     fetchDpsStatus(sectionId, ip);
-
-    // Set up polling
-    pollingIntervals[sectionId] = setInterval(() => {
-      fetchDpsStatus(sectionId, ip);
-    }, interval);
-
     return () => stopPolling(sectionId);
   };
 
-  const stopPolling = (sectionId: number) => {
-    if (pollingIntervals[sectionId]) {
-      clearInterval(pollingIntervals[sectionId]);
-      delete pollingIntervals[sectionId];
+  const cleanup = () => {
+    Object.keys(GLOBAL_POLLING_REGISTRY)
+      .filter(key => key.startsWith('dpsPressure:'))
+      .forEach(key => {
+        clearInterval(GLOBAL_POLLING_REGISTRY[key]);
+        delete GLOBAL_POLLING_REGISTRY[key];
+      });
+    if (appStateListener) {
+      appStateListener.remove();
+      appStateListener = null;
     }
   };
 
-  const cleanup = () => {
-    Object.keys(pollingIntervals).forEach(sectionId => {
-      stopPolling(Number(sectionId));
-    });
-  };
   const initialize = async () => {
     cleanup();
 
@@ -126,6 +159,14 @@ const useDpsPressureStore = create<DPSState>((set, get) => {
       sections.forEach(section => {
         if (section?.id && section?.ip) {
           startPolling(section.id, section.ip);
+        }
+      });
+
+      appStateListener = AppState.addEventListener('change', nextAppState => {
+        if (nextAppState === 'active') {
+          initialize();
+        } else if (nextAppState === 'background') {
+          cleanup();
         }
       });
     } catch (error) {

@@ -1,6 +1,7 @@
 import {create} from 'zustand';
 import {readPowerStatus, toggleLamp} from './modbus';
 import {getSectionsWithStatus} from './db';
+import {AppState} from 'react-native';
 
 interface PowerStatusState {
   sections: Record<
@@ -27,7 +28,7 @@ interface PowerStatusState {
   ) => Promise<void>;
 }
 
-const ACTIVE_POLLING_INTERVAL = 5000; // 5 seconds
+const ACTIVE_POLLING_INTERVAL = 20000; // 20 seconds
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000; // 1 second initial delay
 const MAX_QUEUE_SIZE = 50;
@@ -40,6 +41,8 @@ const useSectionsPowerStatusStore = create<PowerStatusState>((set, get) => {
     [];
   let isProcessing = false;
   let lastSuccessfulFetch: Record<number, number> = {};
+  let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
+    null;
 
   const processQueue = async () => {
     if (isProcessing || requestQueue.length === 0) return;
@@ -295,7 +298,39 @@ const useSectionsPowerStatusStore = create<PowerStatusState>((set, get) => {
     activeRequests = {};
     requestQueue = [];
     lastSuccessfulFetch = {};
+    if (appStateListener) {
+      appStateListener.remove();
+      appStateListener = null;
+    }
   };
+
+  const initialize = async () => {
+    cleanup();
+    try {
+      const sections = await new Promise<any[]>(resolve => {
+        getSectionsWithStatus(resolve);
+      });
+      if (!sections || !Array.isArray(sections)) {
+        throw new Error('Invalid sections data received');
+      }
+      sections.forEach(section => {
+        if (section?.id && section?.ip) {
+          startPolling(section.id, section.ip);
+        }
+      });
+      appStateListener = AppState.addEventListener('change', nextAppState => {
+        if (nextAppState === 'active') {
+          initialize();
+        } else if (nextAppState === 'background') {
+          cleanup();
+        }
+      });
+    } catch (error) {
+      console.error('Error initializing power status store:', error);
+    }
+  };
+
+  initialize();
 
   return {
     sections: {},

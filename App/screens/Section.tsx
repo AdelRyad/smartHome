@@ -26,7 +26,6 @@ import {resetLampHours, resetCleaningHours} from '../../utils/modbus';
 import useCleaningHoursStore from '../../utils/cleaningHoursStore';
 import useWorkingHoursStore from '../../utils/workingHoursStore';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
-import {readLifeHoursSetpoint} from '../../utils/modbus';
 
 type RouteParams = {
   sectionId: string;
@@ -105,17 +104,6 @@ const GridItem = memo(
       () => selectedDevices.some(d => d.id === item.id),
       [selectedDevices, item.id],
     );
-    useEffect(() => {
-      const fetchLifeHours = async () => {
-        try {
-          const setpoint = await readLifeHoursSetpoint('192.168.1.2', 502);
-          console.log('Setpoint:', setpoint);
-        } catch (error) {
-          console.error('Error fetching life hours setpoint:', error);
-        }
-      };
-      fetchLifeHours();
-    }, []);
 
     return (
       <TouchableOpacity

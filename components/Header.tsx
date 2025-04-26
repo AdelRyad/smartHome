@@ -1,4 +1,4 @@
-import React, {useState, useRef, useEffect} from 'react';
+import React, {useState, useRef, useMemo} from 'react';
 import {
   View,
   StyleSheet,
@@ -36,6 +36,13 @@ if (UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
+const HEADER_ELEMENTS = [
+  {title: 'dps', icon: FanIcon},
+  {title: 'lamp', icon: LampIcon},
+  {title: 'pressure', icon: GridIcon},
+  {title: 'cleaning', icon: CleaningIcon},
+];
+
 const Header = () => {
   const navigation = useNavigation();
   const route = useRoute();
@@ -44,7 +51,9 @@ const Header = () => {
   const [password, setPassword] = useState(['', '', '', '']);
   const {setCurrentSectionId} = useCurrentSectionStore();
 
-  const {getSectionStatusSummary} = useStatusStore();
+  const getSectionStatusSummary = useStatusStore(
+    state => state.getSectionStatusSummary,
+  );
 
   const handleKeyPress = (key: string | number) => {
     let newPassword = [...password];
@@ -75,89 +84,21 @@ const Header = () => {
     }
   };
 
-  const [elements, setElements] = useState<
-    Array<{
-      title: string;
-      icon: any;
-      summary: any[];
-      errorCount: number;
-      warningCount: number;
-      status: 'good' | 'warning' | 'error';
-    }>
-  >([
-    {
-      title: 'dps',
-      icon: FanIcon,
-      summary: [],
-      errorCount: 0,
-      warningCount: 0,
-      status: 'good',
-    },
-    {
-      title: 'lamp',
-      icon: LampIcon,
-      summary: [],
-      errorCount: 0,
-      warningCount: 0,
-      status: 'good',
-    },
-    {
-      title: 'pressure',
-      icon: GridIcon,
-      summary: [],
-      errorCount: 0,
-      warningCount: 0,
-      status: 'good',
-    },
-    {
-      title: 'cleaning',
-      icon: CleaningIcon,
-      summary: [],
-      errorCount: 0,
-      warningCount: 0,
-      status: 'good',
-    },
-  ]);
-
-  // Update elements when status changes
-  useEffect(() => {
-    const updateElements = () => {
-      const statusStore = useStatusStore.getState();
-      const updatedElements = elements.map(item => {
-        const summary =
-          statusStore.getSectionStatusSummary(item.title as any) || [];
-        const errorCount = summary.filter(s => s?.status === 'error').length;
-        const warningCount = summary.filter(
-          s => s?.status === 'warning',
-        ).length;
-        console.log('summary', summary);
-
-        return {
-          ...item,
-          summary,
-          errorCount,
-          warningCount,
-          status:
-            errorCount > 0
-              ? ('error' as 'error')
-              : warningCount > 0
-              ? ('warning' as 'warning')
-              : ('good' as 'good'),
-        };
-      });
-
-      setElements(updatedElements);
-    };
-
-    // Initial update
-    updateElements();
-
-    // Subscribe to store changes
-    const unsubscribe = useStatusStore.subscribe(updateElements);
-
-    // Cleanup subscription on unmount
-    return () => unsubscribe();
-  }, []); // Empty dependency array since we handle updates via subscription
+  const elements = useMemo(() => {
+    return HEADER_ELEMENTS.map(item => {
+      const summary = getSectionStatusSummary(item.title);
+      const errorCount = summary.filter(s => s?.status === 'error').length;
+      const warningCount = summary.filter(s => s?.status === 'warning').length;
+      return {
+        ...item,
+        summary,
+        errorCount,
+        warningCount,
+        status:
+          errorCount > 0 ? 'error' : warningCount > 0 ? 'warning' : 'good',
+      };
+    });
+  }, [getSectionStatusSummary]);
 
   const errorCount = elements.reduce((sum, item) => sum + item.errorCount, 0);
   const warningCount = elements.reduce(

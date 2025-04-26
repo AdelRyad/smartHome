@@ -15,6 +15,7 @@ import Home from './App/screens/Home';
 import Section from './App/screens/Section';
 import Contact from './App/screens/Contact';
 import SettingsTabs from './App/screens/SettingsTabs';
+import {initDatabase} from './utils/db';
 
 const Stack = createStackNavigator();
 
@@ -82,7 +83,7 @@ const App = () => {
   useEffect(() => {
     const initializeApp = async () => {
       try {
-        // Add any critical initialization here
+        initDatabase();
         setIsReady(true);
       } catch (error) {
         console.error('Failed to initialize app:', error);

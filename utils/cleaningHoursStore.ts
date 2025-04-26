@@ -3,7 +3,7 @@ import {
   readCleaningHoursSetpoint,
   readSingleLampCleaningRunHours,
 } from './modbus';
-import {getSectionsWithStatus} from './db';
+import {getSectionsWithStatus, getDevicesForSection} from './db';
 import {AppState} from 'react-native';
 
 interface CleaningHoursData {
@@ -29,23 +29,46 @@ interface CleaningHoursState {
   cleanup: () => void;
 }
 
-const POLLING_INTERVAL = 15000; // 15 seconds
+const POLLING_INTERVAL = 20000; // 20 seconds
 const INITIAL_DELAY = 2000; // 2 second delay before first request
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;
 
-const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
-  const pollingIntervals: Record<number, NodeJS.Timeout> = {};
+const GLOBAL_POLLING_REGISTRY: Record<string, NodeJS.Timeout> = {};
+function getPollingKey(sectionId: number) {
+  return `cleaningHours:${sectionId}`;
+}
+
+const useCleaningHoursStore = create<CleaningHoursState>((set, _get) => {
   let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
     null;
   let isFirstRequest = true;
+  let sectionDiscoveryInterval: NodeJS.Timeout | null = null;
+
+  async function getSafeInterval(defaultInterval: number) {
+    // @ts-ignore: performance.memory is not standard in all environments
+    if (global && global.performance && global.performance.memory) {
+      // @ts-ignore
+      const {jsHeapSizeLimit, usedJSHeapSize} = global.performance.memory;
+      if (usedJSHeapSize / jsHeapSizeLimit > 0.8) {
+        return defaultInterval * 2;
+      }
+    }
+    return defaultInterval;
+  }
 
   const fetchCleaningHours = async (
     sectionId: number,
     ip: string,
     retryCount = 0,
   ) => {
-    if (!ip) return;
+    // Always fetch the latest IP for this section before polling
+    const sections = await new Promise<any[]>(resolve =>
+      getSectionsWithStatus(resolve),
+    );
+    const section = sections.find(s => s.id === sectionId);
+    const currentIp = section?.ip || ip;
+    if (!currentIp) return;
 
     try {
       // Add delay for the first request only
@@ -53,6 +76,10 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
         await new Promise(resolve => setTimeout(resolve, INITIAL_DELAY));
         isFirstRequest = false;
       }
+
+      console.log(
+        `[CleaningHours] Fetching for section ${sectionId} (IP: ${currentIp})`,
+      );
 
       set(state => ({
         remainingCleaningHours: {
@@ -67,11 +94,21 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
         error: null,
       }));
 
-      const [setpoint, currentHours] = await Promise.all([
-        readCleaningHoursSetpoint(ip, 502),
-        readSingleLampCleaningRunHours(ip, 502),
-      ]);
-
+      // Fetch device IDs for this section
+      const devices = await new Promise<any[]>(resolve =>
+        getDevicesForSection(sectionId, resolve),
+      );
+      let setpoint: number | null = null;
+      let currentHours: number | null = null;
+      let errorMessage: string | null = null;
+      if (devices.length > 0) {
+        try {
+          setpoint = await readCleaningHoursSetpoint(currentIp, 502);
+          currentHours = await readSingleLampCleaningRunHours(currentIp, 502);
+        } catch (error: any) {
+          errorMessage = error instanceof Error ? error.message : String(error);
+        }
+      }
       const remaining =
         setpoint !== null && currentHours !== null
           ? Math.max(0, Math.floor(setpoint - currentHours))
@@ -85,7 +122,7 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
             current: currentHours,
             remaining,
             loading: false,
-            error: null,
+            error: errorMessage,
             lastUpdated: Date.now(),
           },
         },
@@ -107,7 +144,7 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
           }/${MAX_RETRIES})...`,
         );
         await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-        return fetchCleaningHours(sectionId, ip, retryCount + 1);
+        return fetchCleaningHours(sectionId, currentIp, retryCount + 1);
       }
 
       set(state => ({
@@ -131,29 +168,31 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
     interval = POLLING_INTERVAL,
   ) => {
     const stopPolling = (sectionId: number) => {
-      if (pollingIntervals[sectionId]) {
-        clearInterval(pollingIntervals[sectionId]);
-        delete pollingIntervals[sectionId];
+      const key = getPollingKey(sectionId);
+      if (GLOBAL_POLLING_REGISTRY[key]) {
+        clearInterval(GLOBAL_POLLING_REGISTRY[key]);
+        delete GLOBAL_POLLING_REGISTRY[key];
       }
     };
 
     stopPolling(sectionId);
-    pollingIntervals[sectionId] = setInterval(() => {
-      fetchCleaningHours(sectionId, ip);
-    }, interval);
+    getSafeInterval(interval).then(safeInterval => {
+      const key = getPollingKey(sectionId);
+      GLOBAL_POLLING_REGISTRY[key] = setInterval(() => {
+        fetchCleaningHours(sectionId, ip);
+      }, safeInterval);
+    });
+    fetchCleaningHours(sectionId, ip);
     return () => stopPolling(sectionId);
   };
 
   const stopAllPolling = () => {
-    Object.keys(pollingIntervals).forEach(sectionId => {
-      const stopPolling = (sectionId: number) => {
-        if (pollingIntervals[sectionId]) {
-          clearInterval(pollingIntervals[sectionId]);
-          delete pollingIntervals[sectionId];
-        }
-      };
-      stopPolling(Number(sectionId));
-    });
+    Object.keys(GLOBAL_POLLING_REGISTRY)
+      .filter(key => key.startsWith('cleaningHours:'))
+      .forEach(key => {
+        clearInterval(GLOBAL_POLLING_REGISTRY[key]);
+        delete GLOBAL_POLLING_REGISTRY[key];
+      });
   };
 
   const cleanup = () => {
@@ -162,9 +201,12 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
       appStateListener.remove();
       appStateListener = null;
     }
+    if (sectionDiscoveryInterval) {
+      clearInterval(sectionDiscoveryInterval);
+      sectionDiscoveryInterval = null;
+    }
   };
 
-  // Initialize when store is created
   const initialize = async () => {
     cleanup();
 
@@ -177,7 +219,10 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
       if (!sections || !Array.isArray(sections)) {
         throw new Error('Invalid sections data received');
       }
-      console.log('sections', sections);
+      console.log(
+        '[Polling Init] Sections:',
+        sections.map(s => ({id: s.id, ip: s.ip})),
+      );
 
       sections.forEach(section => {
         // Add proper null checks for section and its properties
@@ -194,6 +239,27 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, get) => {
           cleanup();
         }
       });
+
+      // Periodically check for new sections every 60 seconds
+      if (sectionDiscoveryInterval) clearInterval(sectionDiscoveryInterval);
+      sectionDiscoveryInterval = setInterval(async () => {
+        const latestSections = await new Promise<any[]>(resolve => {
+          getSectionsWithStatus(resolve);
+        });
+        latestSections.forEach(section => {
+          if (section?.id && section?.ip) {
+            const key = getPollingKey(section.id);
+            if (!GLOBAL_POLLING_REGISTRY[key]) {
+              console.log(
+                '[Polling Init] Detected new section, starting polling:',
+                section.id,
+                section.ip,
+              );
+              startPolling(section.id, section.ip);
+            }
+          }
+        });
+      }, 60000);
     } catch (error) {
       console.error('Error initializing cleaning hours store:', error);
       set({

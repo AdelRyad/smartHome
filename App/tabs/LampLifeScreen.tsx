@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback, useMemo} from 'react';
+import React, {useState, useEffect, useCallback} from 'react';
 import {
   View,
   Text,
@@ -59,13 +59,15 @@ export const LampLifeScreen = () => {
 
   // Get lamp data from store for the selected section
   const getLampDataFromStore = useCallback(
-    (deviceId: number): LampHours => {
-      if (!selectedSection) return {currentHours: null, maxHours: null};
-
+    (deviceIndex: number): LampHours => {
+      if (!selectedSection) {
+        return {currentHours: null, maxHours: null};
+      }
       const sectionData = workingHours[selectedSection.id];
-      if (!sectionData) return {currentHours: null, maxHours: null};
-
-      const deviceData = sectionData[deviceId];
+      if (!sectionData) {
+        return {currentHours: null, maxHours: null};
+      }
+      const deviceData = sectionData[deviceIndex];
       return deviceData || {currentHours: null, maxHours: null};
     },
     [workingHours, selectedSection],
@@ -117,6 +119,24 @@ export const LampLifeScreen = () => {
       }
       setLoading(false);
     });
+
+    // Start polling for all sections on mount
+    const intervalId = setInterval(() => {
+      getSectionsWithStatus(fetchedSections => {
+        const formattedSections = fetchedSections
+          .filter(section => !!section.ip)
+          .map(section => ({
+            id: section.id!,
+            name: section.name,
+            ip: section.ip,
+            working: section.working,
+          }));
+        setSections(formattedSections);
+      });
+    }, 5000);
+
+    // Stop polling on unmount
+    return () => clearInterval(intervalId);
   }, [setCurrentSectionId]);
 
   // Fetch devices when selected section changes
@@ -129,10 +149,8 @@ export const LampLifeScreen = () => {
   const handleEdit = () => {
     const initialEdits: {[deviceId: number]: string} = {};
     devices.forEach(device => {
-      if (device.id >= 1 && device.id <= 4) {
-        const lampData = getLampDataFromStore(device.id);
-        initialEdits[device.id] = lampData.maxHours?.toString() || '0';
-      }
+      const lampData = getLampDataFromStore(device.id);
+      initialEdits[device.id] = lampData.maxHours?.toString() || '0';
     });
     setEditedMaxHours(initialEdits);
     setEdit(true);
@@ -145,17 +163,10 @@ export const LampLifeScreen = () => {
 
   const handleInputChange = (deviceId: number, text: string) => {
     const numericText = text.replace(/[^0-9.]/g, '');
-    setEditedMaxHours(prev => {
-      const newState = {...prev};
-      devices.forEach((device, index) => {
-        console.log(`Device ID: ${device.id}, Index: ${index}`);
-
-        if (index >= 0 && index <= 4) {
-          newState[index] = numericText;
-        }
-      });
-      return newState;
-    });
+    setEditedMaxHours(prev => ({
+      ...prev,
+      [deviceId]: numericText,
+    }));
   };
 
   const executeSaveChanges = async () => {
@@ -254,14 +265,14 @@ export const LampLifeScreen = () => {
     </TouchableOpacity>
   );
 
-  const renderGridItem = ({item}: {item: any}) => {
-    const deviceId = item.id;
-    const isMonitoredLamp = deviceId >= 1 && deviceId <= 4;
-    const lampData = getLampDataFromStore(deviceId);
+  const renderGridItem = ({item, index}: {item: any; index: number}) => {
+    // Only last 2 grid items should be disabled
+    const isMonitoredLamp = index < 4;
+    const lampData = getLampDataFromStore(item.id);
 
     const displayMaxHours =
-      edit && editedMaxHours[deviceId] !== undefined
-        ? editedMaxHours[deviceId]
+      edit && editedMaxHours[item.id] !== undefined
+        ? editedMaxHours[item.id]
         : lampData.maxHours !== null
         ? lampData.maxHours?.toString()
         : 'N/A';
@@ -281,18 +292,18 @@ export const LampLifeScreen = () => {
             </View>
 
             <TextInput
-              style={[
+              style={StyleSheet.flatten([
                 styles.daysLeftInput,
-                focusedInputId === deviceId && styles.focusedInput,
-                !isMonitoredLamp && {opacity: 0.5},
-              ]}
+                focusedInputId === item.id ? styles.focusedInput : null,
+                !isMonitoredLamp ? {opacity: 0.5} : null,
+              ])}
               value={displayMaxHours}
               editable={edit && isMonitoredLamp && !loading}
               placeholder="Max Hrs"
               placeholderTextColor={COLORS.gray[600]}
               keyboardType="number-pad"
-              onChangeText={text => handleInputChange(deviceId, text)}
-              onFocus={() => setFocusedInputId(deviceId)}
+              onChangeText={text => handleInputChange(item.id, text)}
+              onFocus={() => setFocusedInputId(item.id)}
               onBlur={() => setFocusedInputId(null)}
               returnKeyType="done"
             />
@@ -378,14 +389,20 @@ export const LampLifeScreen = () => {
         {edit ? (
           <>
             <TouchableOpacity
-              style={[styles.cancelButton, {opacity: loading ? 0.5 : 1}]}
+              style={StyleSheet.flatten([
+                styles.cancelButton,
+                loading ? {opacity: 0.5} : null,
+              ])}
               onPress={handleCancel}
               disabled={loading}>
               <CloseIcon fill={COLORS.gray[600]} width={24} height={24} />
               <Text style={styles.buttonText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.saveButton, {opacity: loading ? 0.5 : 1}]}
+              style={StyleSheet.flatten([
+                styles.saveButton,
+                loading ? {opacity: 0.5} : null,
+              ])}
               onPress={handleConfirmChanges}
               disabled={loading}>
               <CheckIcon2 fill={COLORS.good[600]} width={30} height={30} />
@@ -394,10 +411,10 @@ export const LampLifeScreen = () => {
           </>
         ) : (
           <TouchableOpacity
-            style={[
+            style={StyleSheet.flatten([
               styles.editButton,
-              {opacity: !selectedSection || loading ? 0.5 : 1},
-            ]}
+              !selectedSection || loading ? {opacity: 0.5} : null,
+            ])}
             onPress={handleEdit}
             disabled={!selectedSection || loading}>
             <EditIcon fill={COLORS.gray[600]} width={24} height={24} />

@@ -1,6 +1,7 @@
 import {create} from 'zustand';
 import {readPressureButton} from './modbus';
 import {getSectionsWithStatus} from './db';
+import {AppState} from 'react-native';
 
 interface PressureButtonState {
   sections: Record<
@@ -23,16 +24,32 @@ interface PressureButtonState {
 }
 
 const ACTIVE_POLLING_INTERVAL = 3000; // 3 seconds - more frequent for button state
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 500; // 500ms initial delay - faster for button responsiveness
 const MAX_QUEUE_SIZE = 30; // Smaller queue size since updates are more frequent
 
-const usePressureButtonStore = create<PressureButtonState>((set, get) => {
-  let pollingIntervals: Record<number, NodeJS.Timeout> = {};
+const GLOBAL_POLLING_REGISTRY: Record<string, NodeJS.Timeout> = {};
+function getPollingKey(sectionId: number) {
+  return `pressureButton:${sectionId}`;
+}
+
+const usePressureButtonStore = create<PressureButtonState>((set, _get) => {
   let activeRequests: Record<number, boolean> = {};
   let requestQueue: Array<{sectionId: number; ip: string; timestamp: number}> =
     [];
   let isProcessing = false;
+  let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
+    null;
+
+  async function getSafeInterval(defaultInterval: number) {
+    // @ts-ignore: performance.memory is not standard in all environments
+    if (global && global.performance && global.performance.memory) {
+      // @ts-ignore
+      const {jsHeapSizeLimit, usedJSHeapSize} = global.performance.memory;
+      if (usedJSHeapSize / jsHeapSizeLimit > 0.8) {
+        return defaultInterval * 2;
+      }
+    }
+    return defaultInterval;
+  }
 
   const processQueue = async () => {
     if (isProcessing || requestQueue.length === 0) return;
@@ -59,17 +76,22 @@ const usePressureButtonStore = create<PressureButtonState>((set, get) => {
     }
   };
 
-  const fetchButtonStatus = async (
-    sectionId: number,
-    ip: string,
-    retryCount = 0,
-  ) => {
-    if (!ip || activeRequests[sectionId]) return;
+  const fetchButtonStatus = async (sectionId: number, ip: string) => {
+    // Always fetch the latest IP for this section before polling
+    const sections = await new Promise<any[]>(resolve =>
+      getSectionsWithStatus(resolve),
+    );
+    const section = sections.find(s => s.id === sectionId);
+    const currentIp = section?.ip || ip;
+    if (!currentIp || activeRequests[sectionId]) return;
 
     activeRequests[sectionId] = true;
     const startTime = Date.now();
 
     try {
+      console.log(
+        `[PressureButton] Fetching for section ${sectionId} (IP: ${currentIp})`,
+      );
       set(state => ({
         sections: {
           ...state.sections,
@@ -85,7 +107,7 @@ const usePressureButtonStore = create<PressureButtonState>((set, get) => {
       // Add timeout protection - shorter timeout for button responsiveness
       const buttonStatus = await Promise.race([
         new Promise<boolean | null>(resolve => {
-          readPressureButton(ip, 502, () => {}, resolve);
+          readPressureButton(currentIp, 502, () => {}, resolve);
         }),
         new Promise<null>((_, reject) =>
           setTimeout(() => reject(new Error('Button status timeout')), 3000),
@@ -113,20 +135,7 @@ const usePressureButtonStore = create<PressureButtonState>((set, get) => {
         `Error fetching button status for section ${sectionId}:`,
         error,
       );
-
-      if (retryCount < MAX_RETRIES) {
-        const delay = Math.min(RETRY_DELAY * Math.pow(2, retryCount), 5000);
-        console.log(
-          `Retrying button fetch in ${delay}ms (attempt ${
-            retryCount + 1
-          }/${MAX_RETRIES})`,
-        );
-
-        await new Promise(resolve => setTimeout(resolve, delay));
-        delete activeRequests[sectionId];
-        return fetchButtonStatus(sectionId, ip, retryCount + 1);
-      }
-
+      // Do NOT overwrite the old value on error
       set(state => ({
         sections: {
           ...state.sections,
@@ -152,51 +161,50 @@ const usePressureButtonStore = create<PressureButtonState>((set, get) => {
     interval = ACTIVE_POLLING_INTERVAL,
   ) => {
     stopPolling(sectionId);
-
     // Initial fetch
     if (requestQueue.length < MAX_QUEUE_SIZE) {
-      requestQueue.push({
-        sectionId,
-        ip,
-        timestamp: Date.now(),
-      });
+      requestQueue.push({sectionId, ip, timestamp: Date.now()});
       processQueue();
     }
-
-    // Set up polling with minimal jitter for responsive button state
-    const jitteredInterval = interval + Math.random() * 200 - 100;
-    pollingIntervals[sectionId] = setInterval(() => {
-      if (requestQueue.length < MAX_QUEUE_SIZE) {
-        requestQueue.push({
-          sectionId,
-          ip,
-          timestamp: Date.now(),
-        });
-        processQueue();
-      } else {
-        console.warn(`Button request queue full for section ${sectionId}`);
-      }
-    }, jitteredInterval);
-
+    getSafeInterval(interval).then(safeInterval => {
+      const key = getPollingKey(sectionId);
+      GLOBAL_POLLING_REGISTRY[key] = setInterval(() => {
+        if (requestQueue.length < MAX_QUEUE_SIZE) {
+          requestQueue.push({sectionId, ip, timestamp: Date.now()});
+          processQueue();
+        } else {
+          console.warn(`Button request queue full for section ${sectionId}`);
+        }
+      }, safeInterval + Math.random() * 200 - 100);
+    });
     return () => stopPolling(sectionId);
   };
 
   const stopPolling = (sectionId: number) => {
-    if (pollingIntervals[sectionId]) {
-      clearInterval(pollingIntervals[sectionId]);
-      delete pollingIntervals[sectionId];
+    const key = getPollingKey(sectionId);
+    if (GLOBAL_POLLING_REGISTRY[key]) {
+      clearInterval(GLOBAL_POLLING_REGISTRY[key]);
+      delete GLOBAL_POLLING_REGISTRY[key];
     }
     // Clean up any pending requests
     requestQueue = requestQueue.filter(req => req.sectionId !== sectionId);
   };
 
   const cleanup = () => {
-    Object.keys(pollingIntervals).forEach(sectionId => {
-      stopPolling(Number(sectionId));
-    });
+    Object.keys(GLOBAL_POLLING_REGISTRY)
+      .filter(key => key.startsWith('pressureButton:'))
+      .forEach(key => {
+        clearInterval(GLOBAL_POLLING_REGISTRY[key]);
+        delete GLOBAL_POLLING_REGISTRY[key];
+      });
     activeRequests = {};
     requestQueue = [];
+    if (appStateListener) {
+      appStateListener.remove();
+      appStateListener = null;
+    }
   };
+
   const initialize = async () => {
     cleanup();
 
@@ -214,11 +222,21 @@ const usePressureButtonStore = create<PressureButtonState>((set, get) => {
           startPolling(section.id, section.ip);
         }
       });
+
+      appStateListener = AppState.addEventListener('change', nextAppState => {
+        if (nextAppState === 'active') {
+          initialize();
+        } else if (nextAppState === 'background') {
+          cleanup();
+        }
+      });
     } catch (error) {
       console.error('Error initializing DPS status:', error);
     }
   };
+
   initialize();
+
   return {
     sections: {},
     isLoading: false,
