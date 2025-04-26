@@ -24,7 +24,7 @@ interface PressureButtonState {
   cleanup: () => void;
 }
 
-const ACTIVE_POLLING_INTERVAL = 20000; // 20 seconds - match other polling intervals
+const ACTIVE_POLLING_INTERVAL = 10000; // 20 seconds - match other polling intervals
 const MAX_QUEUE_SIZE = 30; // Smaller queue size since updates are more frequent
 
 const GLOBAL_POLLING_REGISTRY: Record<string, NodeJS.Timeout> = {};

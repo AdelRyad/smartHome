@@ -24,7 +24,7 @@ interface DPSState {
   cleanup: () => void;
 }
 
-const POLLING_INTERVAL = 20000; // 20 seconds
+const POLLING_INTERVAL = 10000; // 20 seconds
 
 const GLOBAL_POLLING_REGISTRY: Record<string, NodeJS.Timeout> = {};
 function getPollingKey(sectionId: number) {

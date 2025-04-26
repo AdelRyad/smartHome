@@ -1,9 +1,8 @@
-import React, {useState, useRef, useMemo} from 'react';
+import React, {useState, useRef, useMemo, useCallback} from 'react';
 import {
   View,
   StyleSheet,
   TouchableOpacity,
-  Text,
   ScrollView,
   LayoutAnimation,
   UIManager,
@@ -23,14 +22,14 @@ import {
   InActiveHomeIcon,
   FanIcon,
   Settings2Icon,
-  LockIcon,
 } from '../icons';
 import {useNavigation, useRoute} from '@react-navigation/native';
 import {COLORS} from '../constants/colors';
 import {useStatusStore} from '../utils/statusStore';
 import TooltipContent from './TooltipContent';
-import PopupModal from './PopupModal';
 import {useCurrentSectionStore} from '../utils/useCurrentSectionStore';
+import HeaderStatusIcon from './HeaderStatusIcon';
+import PasswordModal from './PasswordModal';
 
 if (UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -50,43 +49,48 @@ const Header = () => {
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [password, setPassword] = useState(['', '', '', '']);
   const {setCurrentSectionId} = useCurrentSectionStore();
-
   const getSectionStatusSummary = useStatusStore(
     state => state.getSectionStatusSummary,
   );
 
-  const handleKeyPress = (key: string | number) => {
-    let newPassword = [...password];
+  const handleKeyPress = useCallback(
+    (key: string | number) => {
+      let newPassword = [...password];
 
-    if (key === 'DEL') {
-      let lastFilledIndex = newPassword.length - 1;
-      while (lastFilledIndex >= 0 && newPassword[lastFilledIndex] === '') {
-        lastFilledIndex--;
+      if (key === 'DEL') {
+        let lastFilledIndex = newPassword.length - 1;
+        while (lastFilledIndex >= 0 && newPassword[lastFilledIndex] === '') {
+          lastFilledIndex--;
+        }
+
+        if (lastFilledIndex >= 0) {
+          newPassword[lastFilledIndex] = '';
+        }
+      } else {
+        const firstEmptyIndex = newPassword.findIndex(p => p === '');
+        if (firstEmptyIndex !== -1) {
+          newPassword[firstEmptyIndex] = key.toString();
+        }
       }
 
-      if (lastFilledIndex >= 0) {
-        newPassword[lastFilledIndex] = '';
-      }
-    } else {
-      const firstEmptyIndex = newPassword.findIndex(p => p === '');
-      if (firstEmptyIndex !== -1) {
-        newPassword[firstEmptyIndex] = key.toString();
-      }
-    }
+      setPassword(newPassword);
 
-    setPassword(newPassword);
-
-    if (newPassword.join('') === '3536') {
-      if (NativeModules.KioskModule) {
-        NativeModules.KioskModule.stopKioskMode();
+      if (newPassword.join('') === '3536') {
+        if (NativeModules.KioskModule) {
+          NativeModules.KioskModule.stopKioskMode();
+        }
+        setIsModalVisible(false);
       }
-      setIsModalVisible(false);
-    }
-  };
+    },
+    [password],
+  );
 
+  // Memoize elements and counts to avoid recalculation on every render
   const elements = useMemo(() => {
     return HEADER_ELEMENTS.map(item => {
-      const summary = getSectionStatusSummary(item.title);
+      const summary = getSectionStatusSummary(
+        item.title as 'dps' | 'pressure' | 'cleaning' | 'lamp',
+      );
       const errorCount = summary.filter(s => s?.status === 'error').length;
       const warningCount = summary.filter(s => s?.status === 'warning').length;
       return {
@@ -100,10 +104,13 @@ const Header = () => {
     });
   }, [getSectionStatusSummary]);
 
-  const errorCount = elements.reduce((sum, item) => sum + item.errorCount, 0);
-  const warningCount = elements.reduce(
-    (sum, item) => sum + item.warningCount,
-    0,
+  const errorCount = useMemo(
+    () => elements.reduce((sum, item) => sum + item.errorCount, 0),
+    [elements],
+  );
+  const warningCount = useMemo(
+    () => elements.reduce((sum, item) => sum + item.warningCount, 0),
+    [elements],
   );
 
   const [tooltip, setTooltip] = useState<{
@@ -114,11 +121,12 @@ const Header = () => {
 
   const iconRefs = useRef<(View | null)[]>([]);
 
-  const handlePress = (index: number, title: string) => {
+  // Memoize handlePress to avoid re-creating on every render
+  const handlePress = useCallback((index: number, title: string) => {
     const iconRef = iconRefs.current[index];
-
-    if (!iconRef) return;
-
+    if (!iconRef) {
+      return;
+    }
     iconRef.measure((x, y, width, height, pageX, pageY) => {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
 
@@ -135,50 +143,39 @@ const Header = () => {
             },
       );
     });
-  };
+  }, []);
 
   const closeTooltip = () => {
     setTooltip(null);
   };
 
+  // Memoize navigation handlers
+  const handleNavigateHome = useCallback(() => {
+    navigation.navigate('Home' as never);
+    setCurrentSectionId(null);
+  }, [navigation, setCurrentSectionId]);
+
+  const handleNavigateSettings = useCallback(() => {
+    navigation.navigate('Settings' as never);
+    setCurrentSectionId(null);
+  }, [navigation, setCurrentSectionId]);
+
+  const handleNavigateContact = useCallback(() => {
+    navigation.navigate('ContactUs' as never);
+    setCurrentSectionId(null);
+  }, [navigation, setCurrentSectionId]);
+
   return (
     <View style={styles.header}>
-      <PopupModal
-        hideAcitons={true}
+      <PasswordModal
         visible={isModalVisible}
+        password={password}
         onClose={() => {
           setIsModalVisible(false);
         }}
-        title="Enter Password"
-        onConfirm={() => {}}
-        Icon={LockIcon}>
-        <View style={styles.otpContainer}>
-          {password.map((digit, index) => (
-            <View key={index} style={styles.otpBox}>
-              <Text style={styles.otpText}>{digit}</Text>
-            </View>
-          ))}
-        </View>
-        <View style={styles.keypad}>
-          {[
-            [1, 2, 3],
-            [4, 5, 6],
-            [7, 8, 9],
-            ['0', 'DEL'],
-          ].map((row, rowIndex) => (
-            <View key={rowIndex} style={styles.keyRow}>
-              {row.map((num, index) => (
-                <TouchableOpacity
-                  key={index}
-                  style={styles.keyButton}
-                  onPress={() => handleKeyPress(num)}>
-                  <Text style={styles.keyText}>{num}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          ))}
-        </View>
-      </PopupModal>
+        onKeyPress={handleKeyPress}
+        styles={styles}
+      />
       <TouchableOpacity
         onLongPress={() => {
           setIsModalVisible(true);
@@ -191,10 +188,7 @@ const Header = () => {
         <View style={styles.navLinks}>
           <TouchableOpacity
             style={[styles.link, currentPage === 'Home' && styles.activeLink]}
-            onPress={() => {
-              navigation.navigate('Home' as never);
-              setCurrentSectionId(null);
-            }}>
+            onPress={handleNavigateHome}>
             {currentPage === 'Home' ? <HomeIcon /> : <InActiveHomeIcon />}
           </TouchableOpacity>
           <TouchableOpacity
@@ -205,10 +199,7 @@ const Header = () => {
                 currentPage !== 'Section' &&
                 styles.activeLink,
             ]}
-            onPress={() => {
-              navigation.navigate('Settings' as never);
-              setCurrentSectionId(null);
-            }}>
+            onPress={handleNavigateSettings}>
             {currentPage !== 'ContactUs' &&
             currentPage !== 'Home' &&
             currentPage !== 'Section' ? (
@@ -225,60 +216,14 @@ const Header = () => {
           <View style={styles.control}>
             <View style={styles.status}>
               {elements.map((item, index) => (
-                <View key={index} style={styles.iconWrapper}>
-                  <View
-                    ref={el => (iconRefs.current[index] = el as View | null)}
-                    style={styles.statusIconContainer}>
-                    <TouchableOpacity
-                      style={styles.iconButton}
-                      onPress={() => handlePress(index, item.title)}>
-                      <View
-                        style={[
-                          styles.statusIndicator,
-                          {
-                            backgroundColor:
-                              item.errorCount > 0
-                                ? COLORS.error[500]
-                                : item.warningCount > 0
-                                ? COLORS.warning[500]
-                                : COLORS.good[500],
-                          },
-                        ]}>
-                        {item.errorCount > 0 ? (
-                          <Text style={styles.statusText}>
-                            {item.errorCount}
-                          </Text>
-                        ) : item.warningCount > 0 ? (
-                          <Text style={styles.statusText}>
-                            {item.warningCount}
-                          </Text>
-                        ) : (
-                          <CheckIcon fill="#fff" style={styles.checkIcon} />
-                        )}
-                      </View>
-                      <item.icon
-                        fill={
-                          item.title !== 'pressure'
-                            ? item.errorCount > 0
-                              ? COLORS.error[500]
-                              : item.warningCount > 0
-                              ? COLORS.warning[500]
-                              : COLORS.good[500]
-                            : '#fff'
-                        }
-                        stroke={
-                          item.title === 'pressure'
-                            ? item.errorCount > 0
-                              ? COLORS.error[500]
-                              : item.warningCount > 0
-                              ? COLORS.warning[500]
-                              : COLORS.good[500]
-                            : ''
-                        }
-                      />
-                    </TouchableOpacity>
-                  </View>
-                </View>
+                <HeaderStatusIcon
+                  key={index}
+                  item={item}
+                  index={index}
+                  iconRef={el => (iconRefs.current[index] = el as View | null)}
+                  onPress={handlePress}
+                  styles={styles}
+                />
               ))}
             </View>
             <View style={styles.actions}>
@@ -290,10 +235,7 @@ const Header = () => {
                       currentPage === 'ContactUs' ? COLORS.teal[500] : '#fff',
                   },
                 ]}
-                onPress={() => {
-                  navigation.navigate('ContactUs' as never);
-                  setCurrentSectionId(null);
-                }}>
+                onPress={handleNavigateContact}>
                 <CustomerServiceIcon
                   fill={currentPage === 'ContactUs' ? '#fff' : '#000'}
                   width={30}

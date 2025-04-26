@@ -68,7 +68,7 @@ type SectionErrorType =
   | 'cleaning';
 
 const ACTIVE_POLLING_INTERVAL = 60000;
-const ERROR_RETENTION_TIME = 30 * 60 * 1000; // 30 minutes
+const ERROR_RETENTION_TIME = 10 * 60 * 1000; // 30 minutes
 
 export const useStatusStore = create<StatusState>((set, get) => {
   let pollingIntervals: Record<number, NodeJS.Timeout> = {};
@@ -156,13 +156,20 @@ export const useStatusStore = create<StatusState>((set, get) => {
     // If not connected, count as a failure
     if (!isConnected) {
       recordSectionFailure(sectionId);
+      sectionErrors.push({
+        type: 'connection',
+        message: `Section ${sectionId}: Connection lost – check network or power.`,
+        timestamp: now,
+      });
     }
 
     // Collect errors from all stores
     if (powerStore.sections[sectionId]?.error) {
       sectionErrors.push({
         type: 'power',
-        message: powerStore.sections[sectionId]?.error || 'Power status error',
+        message: `Section ${sectionId}: Power error – ${
+          powerStore.sections[sectionId]?.error || 'Unknown power status error.'
+        }`,
         timestamp: now,
       });
     }
@@ -170,7 +177,9 @@ export const useStatusStore = create<StatusState>((set, get) => {
     if (dpsStore.sections[sectionId]?.error) {
       sectionErrors.push({
         type: 'pressure',
-        message: dpsStore.sections[sectionId]?.error || 'DPS status error',
+        message: `Section ${sectionId}: Pressure sensor error – ${
+          dpsStore.sections[sectionId]?.error || 'DPS status error.'
+        }`,
         timestamp: now,
       });
     }
@@ -180,23 +189,35 @@ export const useStatusStore = create<StatusState>((set, get) => {
     for (let lampId = 1; lampId <= 4; lampId++) {
       try {
         const lampHours = workingStore.workingHours[sectionId]?.[lampId];
-
         let status: StatusLevel = 'good';
-        let message = 'Lamp is operational';
-
+        let message = `Section ${sectionId} Lamp ${lampId} is operational.`;
         if (lampHours?.error) {
           status = 'error';
-          message = lampHours.error;
+          message = `Section ${sectionId} Lamp ${lampId} error: ${lampHours.error}`;
           sectionErrors.push({
             type: 'lamp',
-            message: `Lamp ${lampId}: ${lampHours.error}`,
+            message,
             timestamp: now,
           });
-        } else if (lampHours.currentHours / lampHours.maxHours > 0.9) {
-          status = 'warning';
-          message = `Lamp life at ${lampHours.currentHours}%`;
+        } else if (
+          lampHours?.currentHours != null &&
+          lampHours?.maxHours != null &&
+          lampHours.maxHours > 0
+        ) {
+          const percentLeft = 1 - lampHours.currentHours / lampHours.maxHours;
+          if (percentLeft < 0.1) {
+            status = 'error';
+            message = `Section ${sectionId} Lamp ${lampId} life is under 10% – replacement recommended.`;
+            sectionErrors.push({
+              type: 'lamp',
+              message,
+              timestamp: now,
+            });
+          } else if (percentLeft < 0.5) {
+            status = 'warning';
+            message = `Section ${sectionId} Lamp ${lampId} life is below 50%.`;
+          }
         }
-
         lamps[lampId] = {
           status,
           message,
@@ -204,16 +225,56 @@ export const useStatusStore = create<StatusState>((set, get) => {
       } catch (error) {
         lamps[lampId] = {
           status: 'error' as StatusLevel,
-          message: error instanceof Error ? error.message : String(error),
+          message: `Section ${sectionId} Lamp ${lampId} error: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
         };
         sectionErrors.push({
           type: 'lamp',
-          message: `Lamp ${lampId}: ${
+          message: `Section ${sectionId} Lamp ${lampId} error: ${
             error instanceof Error ? error.message : String(error)
           }`,
           timestamp: now,
         });
       }
+    }
+
+    // Cleaning status
+    const cleaning = cleaningStore.remainingCleaningHours[sectionId];
+    if (cleaning) {
+      const {remaining, maxHours} = cleaning;
+      if (remaining == null || maxHours == null) {
+        sectionErrors.push({
+          type: 'cleaning',
+          message: `Section ${sectionId}: Cleaning hours data unavailable.`,
+          timestamp: now,
+        });
+      } else {
+        const percentLeft = remaining / maxHours;
+        if (percentLeft <= 0) {
+          sectionErrors.push({
+            type: 'cleaning',
+            message: `Section ${sectionId}: Cleaning hours exhausted – cleaning required immediately!`,
+            timestamp: now,
+          });
+        } else if (percentLeft < 0.1) {
+          sectionErrors.push({
+            type: 'cleaning',
+            message: `Section ${sectionId}: Cleaning hours below 10% – cleaning required soon.`,
+            timestamp: now,
+          });
+        }
+      }
+    }
+
+    // Pressure button status
+    const pressureBtn = pressureStore.sections[sectionId];
+    if (pressureBtn && pressureBtn.isPressed) {
+      sectionErrors.push({
+        type: 'pressure',
+        message: `Section ${sectionId}: Pressure button is pressed – check for abnormal pressure.`,
+        timestamp: now,
+      });
     }
 
     // Update store state
@@ -382,7 +443,7 @@ export const useStatusStore = create<StatusState>((set, get) => {
             message:
               remaining === null
                 ? 'Cleaning hours unavailable'
-                : `${remaining}h remaining`,
+                : ` ${remaining}h remaining`,
           });
           break;
       }

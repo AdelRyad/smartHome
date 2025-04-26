@@ -30,7 +30,7 @@ interface CleaningHoursState {
   cleanup: () => void;
 }
 
-const POLLING_INTERVAL = 20000; // 20 seconds
+const POLLING_INTERVAL = 10000; // 20 seconds
 const INITIAL_DELAY = 2000; // 2 second delay before first request
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000;

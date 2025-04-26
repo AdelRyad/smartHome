@@ -25,7 +25,7 @@ interface WorkingHoursState {
   cleanup: () => void;
 }
 
-const POLLING_INTERVAL = 20000; // 20 seconds
+const POLLING_INTERVAL = 10000; // 20 seconds
 const LAMP_REQUEST_DELAY = 500; // Increased to 500ms between lamp requests
 const INITIAL_DELAY = 2000; // 2 second delay before first request
 const MAX_RETRIES = 3;
@@ -129,6 +129,10 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, _get) => {
 
         try {
           const result = await readLampHours(currentIp, 502, lampIndex);
+          console.log(
+            `Lamp ${lampIndex} hours for section ${sectionId}: ${result.currentHours}`,
+          );
+
           updatedWorkingHours[device.id] = {
             currentHours: result.currentHours,
             maxHours,

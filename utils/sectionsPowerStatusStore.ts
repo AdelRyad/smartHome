@@ -29,7 +29,7 @@ interface PowerStatusState {
   ) => Promise<void>;
 }
 
-const ACTIVE_POLLING_INTERVAL = 20000; // 20 seconds
+const ACTIVE_POLLING_INTERVAL = 10000; // 20 seconds
 const MAX_RETRIES = 3;
 const RETRY_DELAY = 1000; // 1 second initial delay
 const MAX_QUEUE_SIZE = 50;
