@@ -22,11 +22,6 @@ import CustomTabBar from '../../components/CustomTabBar';
 import PopupModal from '../../components/PopupModal';
 import {getSectionsWithStatus, updateSection} from '../../utils/db';
 import modbusConnectionManager from '../../utils/modbusConnectionManager';
-import useWorkingHoursStore from '../../utils/workingHoursStore';
-import useCleaningHoursStore from '../../utils/cleaningHoursStore';
-import useDpsPressureStore from '../../utils/dpsPressureStore';
-import usePressureButtonStore from '../../utils/pressureButtonStore';
-import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 
 interface Section {
   id: number;
@@ -123,11 +118,6 @@ const IpAddressScreen = () => {
     };
     fetchData();
     return () => {
-      useWorkingHoursStore.getState().cleanup();
-      useCleaningHoursStore.getState().cleanup();
-      useDpsPressureStore.getState().cleanup();
-      usePressureButtonStore.getState().cleanup();
-      useSectionsPowerStatusStore.getState().cleanup();
       modbusConnectionManager.closeAll();
     };
   }, []);

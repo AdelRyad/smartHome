@@ -25,11 +25,6 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import PopupModal from '../../components/PopupModal';
 import {getContactInfo, updateContactInfo} from '../../utils/db';
 import modbusConnectionManager from '../../utils/modbusConnectionManager';
-import useWorkingHoursStore from '../../utils/workingHoursStore';
-import useCleaningHoursStore from '../../utils/cleaningHoursStore';
-import useDpsPressureStore from '../../utils/dpsPressureStore';
-import usePressureButtonStore from '../../utils/pressureButtonStore';
-import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 
 interface ContactField {
   key: keyof ContactInfoState;
@@ -179,11 +174,6 @@ const ContactScreen = () => {
       }
     });
     return () => {
-      useWorkingHoursStore.getState().cleanup();
-      useCleaningHoursStore.getState().cleanup();
-      useDpsPressureStore.getState().cleanup();
-      usePressureButtonStore.getState().cleanup();
-      useSectionsPowerStatusStore.getState().cleanup();
       modbusConnectionManager.closeAll();
     };
   }, []);

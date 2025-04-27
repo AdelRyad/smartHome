@@ -4,19 +4,14 @@ import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
 import {CloseIcon, LampIcon, RemoveIcon, RepeatIcon} from '../../icons';
 import {useRoute} from '@react-navigation/native';
-import {getDevicesForSection, getSectionsWithStatus} from '../../utils/db';
+import {getSectionsWithStatus, getDevicesForSection} from '../../utils/db';
 import {resetLampHours, resetCleaningHours} from '../../utils/modbus';
-import useCleaningHoursStore from '../../utils/cleaningHoursStore';
-import useWorkingHoursStore from '../../utils/workingHoursStore';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 import CleaningDaysLeft from '../../components/CleaningDaysLeft';
 import GridItem from '../../components/GridItem';
 import PasswordModal from '../../components/PasswordModal';
 import SectionResetModal from '../../components/SectionResetModal';
-import modbusConnectionManager from '../../utils/modbusConnectionManager';
-import useDpsPressureStore from '../../utils/dpsPressureStore';
-import usePressureButtonStore from '../../utils/pressureButtonStore';
-import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
+import {useSectionDataStore} from '../../utils/useSectionDataStore';
 
 type RouteParams = {
   sectionId: string;
@@ -44,24 +39,55 @@ const Section = () => {
     useState(false);
 
   // Store hooks
-  const useWorkingStore = useWorkingHoursStore();
-  const useCleaningStore = useCleaningHoursStore();
   const {setCurrentSectionId, currentSectionId} = useCurrentSectionStore();
+  const {
+    sections: sectionDataMap,
+    startPolling,
+    stopPolling,
+    cleanup,
+  } = useSectionDataStore();
 
-  // Derived data
-  const workingHours = useMemo(
-    () => useWorkingStore.workingHours[section?.id] || {},
-    [useWorkingStore.workingHours, section?.id],
-  );
-
+  // Derived data from the new store
+  const sectionData = sectionDataMap[section?.id];
+  // Map working hours for each lamp (1-4) from the store
+  const workingHours = useMemo(() => {
+    if (
+      !sectionData ||
+      !sectionData.workingHours ||
+      !sectionData.maxLifeHours
+    ) {
+      return {};
+    }
+    const result: Record<
+      number,
+      {currentHours: number | null; maxHours: number | null}
+    > = {};
+    for (let lampIndex = 1; lampIndex <= 4; lampIndex++) {
+      const lampData = sectionData.workingHours[lampIndex];
+      result[lampIndex] = {
+        currentHours:
+          lampData &&
+          typeof lampData.currentHours === 'number' &&
+          !isNaN(lampData.currentHours)
+            ? lampData.currentHours
+            : null,
+        maxHours: sectionData.maxLifeHours,
+      };
+    }
+    return result;
+  }, [sectionData]);
   const cleaningData = useMemo(
     () =>
-      useCleaningStore.remainingCleaningHours[section?.id] || {
-        setpoint: null,
-        current: null,
-        remaining: null,
-      },
-    [useCleaningStore.remainingCleaningHours, section?.id],
+      sectionData &&
+      sectionData.cleaningSetpoint !== undefined &&
+      sectionData.cleaningHours !== undefined
+        ? {
+            setpoint: sectionData.cleaningSetpoint,
+            current: sectionData.cleaningHours,
+            remaining: sectionData.cleaningHours,
+          }
+        : {setpoint: null, current: null, remaining: null},
+    [sectionData],
   );
 
   // Callbacks
@@ -200,41 +226,34 @@ const Section = () => {
           cleaningDays: s.cleaningDays,
         }));
       setSections(sectionsWithIp);
-
       const currentSection = sectionsWithIp.find(sec => sec.id === +sectionId);
       setSection(currentSection || {id: sectionId});
     });
     return () => {
-      useWorkingHoursStore.getState().cleanup();
-      useCleaningHoursStore.getState().cleanup();
-      useDpsPressureStore.getState().cleanup();
-      usePressureButtonStore.getState().cleanup();
-      useSectionsPowerStatusStore.getState().cleanup();
-      modbusConnectionManager.closeAll();
+      cleanup();
     };
-  }, [sectionId]);
+  }, [sectionId, cleanup]);
 
   useEffect(() => {
-    if (section?.ip) {
-      const fetchData = async () => {
-        try {
-          const devicesFromDb = await new Promise<any[] | null>(resolve => {
-            getDevicesForSection(+section.id, resolve);
-          });
-          setDevices(devicesFromDb || []);
-        } catch (error: any) {
-          logStatus(
-            `Error fetching data: ${error?.message || String(error)}`,
-            true,
-          );
-          setDevices([]);
-        }
-      };
-      fetchData();
+    if (section && section.ip) {
+      startPolling(section.id, section.ip);
+    }
+    return () => {
+      if (section) {
+        stopPolling(section.id);
+      }
+    };
+  }, [section, startPolling, stopPolling]);
+
+  useEffect(() => {
+    if (section?.id) {
+      getDevicesForSection(section.id, (devicesFromDb: any[]) => {
+        setDevices(devicesFromDb || []);
+      });
     } else {
       setDevices([]);
     }
-  }, [section, logStatus]);
+  }, [section]);
 
   useEffect(() => {
     const errorHandler = (error: Error) => {

@@ -1168,5 +1168,29 @@ export const readSingleCoilCleaningHours = async (
   }
 };
 
+/**
+ * Set the power status (ON/OFF) for a section by toggling the main lamp coil.
+ * @param ip - IP address of the section
+ * @param port - Modbus port (default 502)
+ * @param value - true for ON, false for OFF
+ */
+export const setSectionPowerStatus = async (
+  ip: string,
+  port: number = 502,
+  value: boolean,
+): Promise<void> => {
+  // Use the same logic as toggleLamp for the main coil (Coil 9)
+  await toggleLamp(ip, port, value);
+  // Optionally, you can verify the status after toggling
+  const status = await readPowerStatus(ip, port);
+  if (status !== value) {
+    throw new Error(
+      `Failed to set power status to ${
+        value ? 'ON' : 'OFF'
+      } for section at ${ip}`,
+    );
+  }
+};
+
 // Correct final export block
 export {readDPS, readPressureButton, readLampsOnline, readCurrentAmps};

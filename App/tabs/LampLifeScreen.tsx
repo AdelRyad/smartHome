@@ -22,12 +22,7 @@ import PopupModal from '../../components/PopupModal';
 import {getSectionsWithStatus, getDevicesForSection} from '../../utils/db';
 import {setLampMaxHours} from '../../utils/modbus';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
-import useWorkingHoursStore from '../../utils/workingHoursStore';
-import modbusConnectionManager from '../../utils/modbusConnectionManager';
-import useCleaningHoursStore from '../../utils/cleaningHoursStore';
-import useDpsPressureStore from '../../utils/dpsPressureStore';
-import usePressureButtonStore from '../../utils/pressureButtonStore';
-import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
+import {useSectionDataStore} from '../../utils/useSectionDataStore';
 
 interface SectionSummary {
   id: number;
@@ -42,8 +37,6 @@ interface LampHours {
 }
 
 export const LampLifeScreen = () => {
-  const {workingHours} = useWorkingHoursStore();
-
   const [sections, setSections] = useState<SectionSummary[]>([]);
   const [selectedSection, setSelectedSection] = useState<SectionSummary | null>(
     null,
@@ -59,20 +52,31 @@ export const LampLifeScreen = () => {
 
   const {setCurrentSectionId} = useCurrentSectionStore();
 
-  // Get lamp data from store for the selected section
+  // Use the new centralized store
+  const {
+    sections: sectionDataMap,
+    startPolling,
+    stopPolling,
+    cleanup,
+  } = useSectionDataStore();
+
+  // Get lamp data from the new store for the selected section
   const getLampDataFromStore = useCallback(
-    (deviceIndex: number): LampHours => {
+    (deviceId: number): LampHours => {
       if (!selectedSection) {
         return {currentHours: null, maxHours: null};
       }
-      const sectionData = workingHours[selectedSection.id];
-      if (!sectionData) {
+      const sectionData = sectionDataMap[selectedSection.id];
+      if (!sectionData || !sectionData.workingHours) {
         return {currentHours: null, maxHours: null};
       }
-      const deviceData = sectionData[deviceIndex];
-      return deviceData || {currentHours: null, maxHours: null};
+      const lampData = sectionData.workingHours[deviceId];
+      return {
+        currentHours: lampData?.currentHours ?? null,
+        maxHours: sectionData.maxLifeHours,
+      };
     },
-    [workingHours, selectedSection],
+    [sectionDataMap, selectedSection],
   );
 
   // Fetch devices for section from DB
@@ -98,7 +102,7 @@ export const LampLifeScreen = () => {
     [],
   );
 
-  // Fetch sections list
+  // Fetch sections list and handle polling
   useEffect(() => {
     setLoading(true);
     getSectionsWithStatus(fetchedSections => {
@@ -139,15 +143,22 @@ export const LampLifeScreen = () => {
 
     // Stop polling on unmount
     return () => {
-      useWorkingHoursStore.getState().cleanup();
-      useCleaningHoursStore.getState().cleanup();
-      useDpsPressureStore.getState().cleanup();
-      usePressureButtonStore.getState().cleanup();
-      useSectionsPowerStatusStore.getState().cleanup();
-      modbusConnectionManager.closeAll();
+      cleanup();
       clearInterval(intervalId);
     };
-  }, [setCurrentSectionId]);
+  }, [setCurrentSectionId, cleanup]);
+
+  // Start polling for the selected section
+  useEffect(() => {
+    if (selectedSection && selectedSection.ip) {
+      startPolling(selectedSection.id, selectedSection.ip);
+    }
+    return () => {
+      if (selectedSection) {
+        stopPolling(selectedSection.id);
+      }
+    };
+  }, [selectedSection, startPolling, stopPolling]);
 
   // Fetch devices when selected section changes
   useEffect(() => {

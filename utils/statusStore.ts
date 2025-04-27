@@ -1,11 +1,7 @@
 import {create} from 'zustand';
-import useSectionsPowerStatusStore from './sectionsPowerStatusStore';
-import useWorkingHoursStore from './workingHoursStore';
-import useCleaningHoursStore from './cleaningHoursStore';
-import useDpsPressureStore from './dpsPressureStore';
-import usePressureButtonStore from './pressureButtonStore';
 import {getSectionsWithStatus} from './db';
 import modbusConnectionManager from './modbusConnectionManager';
+import {useSectionDataStore} from './useSectionDataStore';
 
 interface StatusState {
   sections: Record<
@@ -56,6 +52,7 @@ interface StatusState {
     message: string;
   }>;
   reconnectSection: (sectionId: number, ip: string) => void;
+  removeSection: (sectionId: number) => void;
 }
 
 export type StatusLevel = 'error' | 'warning' | 'good';
@@ -73,68 +70,14 @@ const ERROR_RETENTION_TIME = 10 * 60 * 1000; // 30 minutes
 export const useStatusStore = create<StatusState>((set, get) => {
   let pollingIntervals: Record<number, NodeJS.Timeout> = {};
   let activeRequests: Record<number, boolean> = {};
-  // --- Failure tracking additions ---
-  let sectionFailureCounts: Record<number, {count: number; stopped: boolean}> =
-    {};
-  let lastSectionStatus: Record<number, boolean> = {};
-
-  // Helper: Reset section failure count
-  function resetSectionFailure(sectionId: number) {
-    sectionFailureCounts[sectionId] = {count: 0, stopped: false};
-  }
-
-  // Helper: Record section failure and check for threshold
-  function recordSectionFailure(sectionId: number) {
-    if (!sectionFailureCounts[sectionId]) {
-      sectionFailureCounts[sectionId] = {count: 0, stopped: false};
-    }
-    sectionFailureCounts[sectionId].count += 1;
-    if (
-      sectionFailureCounts[sectionId].count >= 5 &&
-      !sectionFailureCounts[sectionId].stopped
-    ) {
-      sectionFailureCounts[sectionId].stopped = true;
-      stopPolling(sectionId);
-      const section = get().sections[sectionId];
-      const ip = section?.ip;
-      const port = 502; // default modbus port
-      if (ip) {
-        modbusConnectionManager.suspendConnection(ip, port);
-      }
-      const now = Date.now();
-      set(state => ({
-        sections: {
-          ...state.sections,
-          [sectionId]: {
-            ...state.sections[sectionId],
-            sectionErrors: [
-              ...(state.sections[sectionId]?.sectionErrors || []),
-              {
-                type: 'connection',
-                message: 'Connection failed 5 times. Polling stopped.',
-                timestamp: now,
-              },
-            ],
-          },
-        },
-      }));
-    }
-  }
-
-  // Helper: Reconnect section
+  // No longer need failure tracking helpers
   function reconnectSection(sectionId: number, ip: string) {
-    resetSectionFailure(sectionId);
     modbusConnectionManager.resumeConnection(ip, 502);
     startPolling(sectionId, ip);
   }
 
   const updateSectionStatus = async (sectionId: number) => {
-    const powerStore = useSectionsPowerStatusStore.getState();
-    const workingStore = useWorkingHoursStore.getState();
-    const cleaningStore = useCleaningHoursStore.getState();
-    const dpsStore = useDpsPressureStore.getState();
-    const pressureStore = usePressureButtonStore.getState();
-
+    const sectionStore = useSectionDataStore.getState();
     const now = Date.now();
     const sectionErrors: Array<{
       type: SectionErrorType;
@@ -142,107 +85,83 @@ export const useStatusStore = create<StatusState>((set, get) => {
       timestamp: number;
     }> = [];
 
-    const section = get().sections[sectionId];
-    const ip = section?.ip;
-    const port = 502;
-    // Check if Modbus is connected for this section
-    let isConnected = true;
-    if (ip) {
-      const modbusState = modbusConnectionManager.connections?.get?.(
-        `${ip}:${port}`,
-      );
-      isConnected = !!(modbusState && modbusState.isConnected);
-    }
-    // If not connected, count as a failure
-    if (!isConnected) {
-      recordSectionFailure(sectionId);
+    const sectionData = sectionStore.sections[sectionId];
+    // Defensive: If no data, mark as connection error
+    if (!sectionData) {
       sectionErrors.push({
         type: 'connection',
-        message: `Section ${sectionId}: Connection lost – check network or power.`,
+        message: `Section ${sectionId}: No data available – check network or power.`,
         timestamp: now,
       });
+      set(state => ({
+        sections: {
+          ...state.sections,
+          [sectionId]: {
+            lamps: {},
+            lastUpdated: now,
+            sectionErrors,
+          },
+        },
+        globalErrors: [
+          ...state.globalErrors,
+          ...sectionErrors.map(e => ({...e, sectionId})),
+        ],
+      }));
+      return;
     }
 
-    // Collect errors from all stores
-    if (powerStore.sections[sectionId]?.error) {
+    // Connection error
+    if (sectionData.error) {
       sectionErrors.push({
-        type: 'power',
-        message: `Section ${sectionId}: Power error – ${
-          powerStore.sections[sectionId]?.error || 'Unknown power status error.'
-        }`,
+        type: 'connection',
+        message: `Section ${sectionId}: ${sectionData.error}`,
         timestamp: now,
       });
     }
 
-    if (dpsStore.sections[sectionId]?.error) {
-      sectionErrors.push({
-        type: 'pressure',
-        message: `Section ${sectionId}: Pressure sensor error – ${
-          dpsStore.sections[sectionId]?.error || 'DPS status error.'
-        }`,
-        timestamp: now,
-      });
-    }
-
-    // Process lamp status
+    // Lamp status
     const lamps: Record<number, any> = {};
     for (let lampId = 1; lampId <= 4; lampId++) {
-      try {
-        const lampHours = workingStore.workingHours[sectionId]?.[lampId];
-        let status: StatusLevel = 'good';
-        let message = `Section ${sectionId} Lamp ${lampId} is operational.`;
-        if (lampHours?.error) {
+      const lamp = sectionData.workingHours?.[lampId];
+      let status: StatusLevel = 'good';
+      let message = `Section ${sectionId} Lamp ${lampId} is operational.`;
+      if (lamp?.error) {
+        status = 'error';
+        message = `Section ${sectionId} Lamp ${lampId} error: ${lamp.error}`;
+        sectionErrors.push({
+          type: 'lamp',
+          message,
+          timestamp: now,
+        });
+      } else if (
+        lamp?.currentHours != null &&
+        sectionData.maxLifeHours != null &&
+        sectionData.maxLifeHours > 0
+      ) {
+        const percentLeft = 1 - lamp.currentHours / sectionData.maxLifeHours;
+        if (percentLeft < 0.1) {
           status = 'error';
-          message = `Section ${sectionId} Lamp ${lampId} error: ${lampHours.error}`;
+          message = `Section ${sectionId} Lamp ${lampId} life is under 10% – replacement recommended.`;
           sectionErrors.push({
             type: 'lamp',
             message,
             timestamp: now,
           });
-        } else if (
-          lampHours?.currentHours != null &&
-          lampHours?.maxHours != null &&
-          lampHours.maxHours > 0
-        ) {
-          const percentLeft = 1 - lampHours.currentHours / lampHours.maxHours;
-          if (percentLeft < 0.1) {
-            status = 'error';
-            message = `Section ${sectionId} Lamp ${lampId} life is under 10% – replacement recommended.`;
-            sectionErrors.push({
-              type: 'lamp',
-              message,
-              timestamp: now,
-            });
-          } else if (percentLeft < 0.5) {
-            status = 'warning';
-            message = `Section ${sectionId} Lamp ${lampId} life is below 50%.`;
-          }
+        } else if (percentLeft < 0.5) {
+          status = 'warning';
+          message = `Section ${sectionId} Lamp ${lampId} life is below 50%.`;
         }
-        lamps[lampId] = {
-          status,
-          message,
-        };
-      } catch (error) {
-        lamps[lampId] = {
-          status: 'error' as StatusLevel,
-          message: `Section ${sectionId} Lamp ${lampId} error: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        };
-        sectionErrors.push({
-          type: 'lamp',
-          message: `Section ${sectionId} Lamp ${lampId} error: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          timestamp: now,
-        });
       }
+      lamps[lampId] = {status, message};
     }
 
     // Cleaning status
-    const cleaning = cleaningStore.remainingCleaningHours[sectionId];
-    if (cleaning) {
-      const {remaining, maxHours} = cleaning;
+    if (
+      sectionData.cleaningHours != null &&
+      sectionData.cleaningSetpoint != null
+    ) {
+      const remaining = sectionData.cleaningHours;
+      const maxHours = sectionData.cleaningSetpoint;
       if (remaining == null || maxHours == null) {
         sectionErrors.push({
           type: 'cleaning',
@@ -268,8 +187,7 @@ export const useStatusStore = create<StatusState>((set, get) => {
     }
 
     // Pressure button status
-    const pressureBtn = pressureStore.sections[sectionId];
-    if (pressureBtn && pressureBtn.isPressed) {
+    if (sectionData.pressureButton) {
       sectionErrors.push({
         type: 'pressure',
         message: `Section ${sectionId}: Pressure button is pressed – check for abnormal pressure.`,
@@ -277,13 +195,20 @@ export const useStatusStore = create<StatusState>((set, get) => {
       });
     }
 
-    // Update store state
+    // DPS status
+    if (sectionData.dpsStatus === false) {
+      sectionErrors.push({
+        type: 'pressure',
+        message: `Section ${sectionId}: DPS status error.`,
+        timestamp: now,
+      });
+    }
+
     set(state => {
       // Clean up old errors
       const cleanedErrors = state.globalErrors.filter(
         error => now - error.timestamp < ERROR_RETENTION_TIME,
       );
-
       return {
         sections: {
           ...state.sections,
@@ -303,17 +228,6 @@ export const useStatusStore = create<StatusState>((set, get) => {
         isLoading: false,
       };
     });
-
-    // Determine if section is up (no errors) or down (has connection error)
-    const hasConnectionError = sectionErrors.some(
-      e => e.type === 'connection' || e.type === 'power',
-    );
-    lastSectionStatus[sectionId] = !hasConnectionError;
-    if (hasConnectionError) {
-      recordSectionFailure(sectionId);
-    } else if (isConnected) {
-      resetSectionFailure(sectionId);
-    }
   };
 
   const startPolling = (
@@ -362,6 +276,7 @@ export const useStatusStore = create<StatusState>((set, get) => {
     type: 'dps' | 'lamp' | 'pressure' | 'cleaning',
   ) => {
     const {sections} = get();
+    const sectionDataStore = useSectionDataStore.getState().sections;
     const result: Array<{
       sectionId: number;
       status: StatusLevel;
@@ -369,14 +284,26 @@ export const useStatusStore = create<StatusState>((set, get) => {
     }> = [];
 
     Object.entries(sections).forEach(([sectionId, section]) => {
+      const data = sectionDataStore[Number(sectionId)];
+      if (!data) {
+        result.push({
+          sectionId: Number(sectionId),
+          status: 'error',
+          message: 'Data unavailable',
+        });
+        return;
+      }
       switch (type) {
         case 'dps':
-          const dpsStatus =
-            useDpsPressureStore.getState().sections[Number(sectionId)]?.isOk;
+          const dpsStatus = data?.dpsStatus;
           result.push({
             sectionId: Number(sectionId),
             status:
-              dpsStatus === null ? 'error' : dpsStatus ? 'good' : 'warning',
+              dpsStatus === null
+                ? 'error'
+                : dpsStatus === true
+                ? 'good'
+                : 'warning',
             message:
               dpsStatus === null
                 ? 'DPS status unavailable'
@@ -402,9 +329,7 @@ export const useStatusStore = create<StatusState>((set, get) => {
           break;
 
         case 'pressure':
-          const pressureStatus =
-            usePressureButtonStore.getState().sections[Number(sectionId)]
-              ?.isPressed;
+          const pressureStatus = data?.pressureButton;
           result.push({
             sectionId: Number(sectionId),
             status:
@@ -423,25 +348,28 @@ export const useStatusStore = create<StatusState>((set, get) => {
           break;
 
         case 'cleaning':
-          const remaining =
-            useCleaningHoursStore.getState().remainingCleaningHours[
-              Number(sectionId)
-            ]?.remaining;
-          const max =
-            useCleaningHoursStore.getState().remainingCleaningHours[
-              Number(sectionId)
-            ]?.maxHours;
-          const percentage =
-            max !== null && remaining !== null
-              ? Math.floor((remaining / max) * 100)
-              : null;
-
+          const remaining = data?.cleaningHours;
+          const max = data?.cleaningSetpoint;
+          let percentage: number | null = null;
+          if (
+            typeof remaining === 'number' &&
+            typeof max === 'number' &&
+            max > 0
+          ) {
+            percentage = Math.floor((remaining / max) * 100);
+          }
           result.push({
             sectionId: Number(sectionId),
             status:
-              percentage <= 0 ? 'error' : percentage < 0.1 ? 'warning' : 'good',
+              percentage === null
+                ? 'error'
+                : percentage <= 0
+                ? 'error'
+                : percentage < 10
+                ? 'warning'
+                : 'good',
             message:
-              remaining === null
+              remaining === null || max === null
                 ? 'Cleaning hours unavailable'
                 : ` ${remaining}h remaining`,
           });
@@ -465,38 +393,30 @@ export const useStatusStore = create<StatusState>((set, get) => {
 
     sections.forEach(section => {
       if (section?.id && section?.ip) {
-        // Start polling in status store
+        // Start polling in status store only
         startPolling(section.id, section.ip);
-
-        // Also ensure other stores are polling
-        useDpsPressureStore.getState().startPolling(section.id, section.ip);
-        usePressureButtonStore.getState().startPolling(section.id, section.ip);
-        useSectionsPowerStatusStore
-          .getState()
-          .startPolling(section.id, section.ip);
-        useWorkingHoursStore.getState().startPolling(section.id, section.ip);
       }
     });
   };
 
-  // Register for Modbus connection errors and count as failures
-  modbusConnectionManager.onError((ip, port, err) => {
-    // Find the sectionId for this ip/port
-    const state = useStatusStore.getState();
-    const sectionEntry = Object.entries(state.sections).find(
-      ([, section]) => section?.ip === ip,
-    );
-    if (sectionEntry) {
-      const sectionId = Number(sectionEntry[0]);
-      // Count as a failure
-      if (typeof state.recordSectionFailure === 'function') {
-        state.recordSectionFailure(sectionId);
-      }
-    }
-  });
+  // No longer need to register for Modbus connection errors by IP
 
   // Call initialize immediately
   initialize();
+
+  const removeSection = (sectionId: number) => {
+    stopPolling(sectionId);
+    set(state => ({
+      sections: Object.fromEntries(
+        Object.entries(state.sections).filter(
+          ([id]) => Number(id) !== sectionId,
+        ),
+      ),
+      globalErrors: state.globalErrors.filter(e => e.sectionId !== sectionId),
+    }));
+    // Optionally, also remove from activeRequests if present
+    delete activeRequests[sectionId];
+  };
 
   return {
     sections: {},
@@ -510,6 +430,7 @@ export const useStatusStore = create<StatusState>((set, get) => {
     getErrorsForSection,
     getAllErrors,
     getSectionStatusSummary,
-    reconnectSection, // Expose for UI
+    reconnectSection,
+    removeSection,
   };
 });

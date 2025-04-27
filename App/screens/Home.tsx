@@ -10,17 +10,11 @@ import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
 import CustomSwitch from '../../components/CustomSwitch';
 import {useNavigation, NavigationProp} from '@react-navigation/native';
-import {getSectionsWithStatus, updateSection} from '../../utils/db';
-import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
-import {useStatusStore} from '../../utils/statusStore';
+import {getSectionsWithStatus} from '../../utils/db';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 import SectionCard from '../../components/SectionCard';
 import WarningSummary from '../../components/WarningSummary';
-import modbusConnectionManager from '../../utils/modbusConnectionManager';
-import useWorkingHoursStore from '../../utils/workingHoursStore';
-import useCleaningHoursStore from '../../utils/cleaningHoursStore';
-import useDpsPressureStore from '../../utils/dpsPressureStore';
-import usePressureButtonStore from '../../utils/pressureButtonStore';
+import {useSectionDataStore} from '../../utils/useSectionDataStore';
 
 type RootStackParamList = {
   Home: undefined;
@@ -38,91 +32,65 @@ const Home = () => {
 
   const {setCurrentSectionId} = useCurrentSectionStore();
 
-  const [sections, setSections] = useState<
-    {
-      ip: string | null;
-      id: number;
-      name: string;
-      connected: boolean;
-      working: boolean;
-      cleaningDays: number;
-    }[]
-  >([]);
+  const [sections, setSections] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
-  const [allSectionsWorking, setAllSectionsWorking] = useState(false);
 
-  const powerStatusStore = useSectionsPowerStatusStore();
-  const statusStore = useStatusStore();
+  const {
+    sections: sectionDataMap,
+    startPolling,
+    stopPolling,
+    cleanup,
+    setSectionPowerStatus,
+  } = useSectionDataStore();
 
   const {errorCount, warningCount} = useMemo(() => {
-    const dpsSummary = statusStore.getSectionStatusSummary('dps');
-    const lampSummary = statusStore.getSectionStatusSummary('lamp');
-    const pressureSummary = statusStore.getSectionStatusSummary('pressure');
-    const cleaningSummary = statusStore.getSectionStatusSummary('cleaning');
-
-    return {
-      errorCount: [
-        ...dpsSummary,
-        ...lampSummary,
-        ...pressureSummary,
-        ...cleaningSummary,
-      ].filter(item => item.status === 'error').length,
-      warningCount: [
-        ...dpsSummary,
-        ...lampSummary,
-        ...pressureSummary,
-        ...cleaningSummary,
-      ].filter(item => item.status === 'warning').length,
-    };
-  }, [statusStore]);
-
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      await getSectionsWithStatus(async sectionsData => {
-        const updatedSections = sectionsData.map(section => {
-          const isConnected = !!section.ip;
-          return {
-            id: section.id!,
-            name: section.name,
-            connected: isConnected,
-            working: section.working,
-            ip: section.ip || null,
-            cleaningDays: section.cleaningDays,
-          };
-        });
-        setSections(updatedSections);
-        const connectedSections = updatedSections.filter(s => s.connected);
-        const allConnectedWorking =
-          connectedSections.length > 0 &&
-          connectedSections.every(s => s.working);
-        setAllSectionsWorking(allConnectedWorking);
-      });
-    } catch (error) {
-      console.error('Error fetching sections:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    let errorCount = 0;
+    let warningCount = 0;
+    Object.values(sectionDataMap).forEach(data => {
+      if (data.dpsStatus === null || data.pressureButton === null) errorCount++;
+      else if (data.dpsStatus === false || data.pressureButton === false)
+        warningCount++;
+    });
+    return {errorCount, warningCount};
+  }, [sectionDataMap]);
 
   useEffect(() => {
-    fetchData();
-    const unsubscribe = navigation.addListener('focus', fetchData);
+    setLoading(true);
+    getSectionsWithStatus(fetchedSections => {
+      const formattedSections = fetchedSections.map(section => ({
+        id: section.id!,
+        name: section.name,
+        connected: !!section.ip,
+        working: section.working,
+        ip: section.ip || null,
+        cleaningDays: section.cleaningDays,
+      }));
+      setSections(formattedSections);
+      setLoading(false);
+    });
     return () => {
-      useWorkingHoursStore.getState().cleanup();
-      useCleaningHoursStore.getState().cleanup();
-      useDpsPressureStore.getState().cleanup();
-      usePressureButtonStore.getState().cleanup();
-      useSectionsPowerStatusStore.getState().cleanup();
-      modbusConnectionManager.closeAll();
-      if (typeof unsubscribe === 'function') unsubscribe();
+      cleanup();
     };
-  }, [fetchData, navigation]);
+  }, [cleanup]);
+
+  useEffect(() => {
+    sections.forEach(section => {
+      if (section.id && section.ip) {
+        startPolling(section.id, section.ip);
+      }
+    });
+    return () => {
+      sections.forEach(section => {
+        if (section.id) {
+          stopPolling(section.id);
+        }
+      });
+    };
+  }, [sections, startPolling, stopPolling]);
 
   const handleToggleAllSections = useCallback(
     async (newStatus: boolean) => {
       setLoading(true);
-
       const connectedSections = sections.filter(
         section => section.connected && section.ip,
       );
@@ -130,56 +98,19 @@ const Home = () => {
         setLoading(false);
         return;
       }
-
       try {
-        // Update power status for all sections
         await Promise.all(
           connectedSections.map(section =>
-            powerStatusStore.setPowerStatus(section.id, section.ip!, newStatus),
+            setSectionPowerStatus(section.id, section.ip, newStatus),
           ),
         );
-
-        // Update database for all sections
-        await Promise.all(
-          connectedSections.map(
-            section =>
-              new Promise<void>(resolve => {
-                updateSection(
-                  section.id,
-                  section.name,
-                  section.ip!,
-                  section.cleaningDays,
-                  newStatus,
-                  (success: boolean) => {
-                    if (!success) {
-                      console.error(
-                        `Failed to update DB for section ${section.id}`,
-                      );
-                    }
-                    resolve();
-                  },
-                );
-              }),
-          ),
-        );
-
-        // Update local state
-        const finalSectionsState = sections.map(section => ({
-          ...section,
-          working:
-            section.connected && section.ip ? newStatus : section.working,
-        }));
-        setSections(finalSectionsState);
-        setAllSectionsWorking(newStatus);
       } catch (error) {
-        console.error('Error toggling all sections:', error);
-        // On error, refresh section states
-        fetchData();
+        // Optionally handle error
       } finally {
         setLoading(false);
       }
     },
-    [sections, powerStatusStore, fetchData],
+    [sections, setSectionPowerStatus],
   );
 
   const handleToggleSwitch = useCallback(
@@ -190,44 +121,16 @@ const Home = () => {
         setLoading(false);
         return;
       }
-      const currentStatus =
-        powerStatusStore.sections[section.id]?.isPowered ?? false;
-      const newStatus = !currentStatus;
+      const newStatus = !sectionDataMap[section.id]?.powerStatus;
       try {
-        // Update power status for the section
-        await powerStatusStore.setPowerStatus(
-          section.id,
-          section.ip!,
-          newStatus,
-        );
-        // Update database for the section
-        await updateSection(
-          section.id,
-          section.name,
-          section.ip!,
-          section.cleaningDays,
-          newStatus,
-          (success: boolean) => {
-            if (!success) {
-              console.error(`Failed to update DB for section ${section.id}`);
-            }
-          },
-        );
-        // Update local state
-        const finalSectionsState = sections.map((s, i) =>
-          i === index ? {...s, working: newStatus} : s,
-        );
-        setSections(finalSectionsState);
-        setAllSectionsWorking(sections.every(s => s.connected && s.working));
+        await setSectionPowerStatus(section.id, section.ip, newStatus);
       } catch (error) {
-        console.error('Error toggling section:', error);
-        // On error, refresh section state
-        fetchData();
+        // Optionally handle error
       } finally {
         setLoading(false);
       }
     },
-    [sections, powerStatusStore, fetchData],
+    [sections, sectionDataMap, setSectionPowerStatus],
   );
 
   const handleNavigate = useCallback(
@@ -252,12 +155,12 @@ const Home = () => {
         item={item}
         index={index}
         loading={loading}
-        powerStatus={powerStatusStore.sections[item.id]?.isPowered ?? false}
+        powerStatus={sectionDataMap[item.id]?.powerStatus ?? false}
         onToggleSwitch={handleToggleSwitch}
         onNavigate={handleNavigate}
       />
     ),
-    [loading, powerStatusStore.sections, handleToggleSwitch, handleNavigate],
+    [loading, handleToggleSwitch, handleNavigate, sectionDataMap],
   );
 
   const keyExtractor = useCallback((item: any) => item.id.toString(), []);
@@ -285,7 +188,7 @@ const Home = () => {
           contentContainerStyle={styles.gridContentContainer}
           showsVerticalScrollIndicator={false}
           scrollEnabled={!loading}
-          extraData={[loading, powerStatusStore.sections]}
+          extraData={[loading, sections]}
           initialNumToRender={8}
           maxToRenderPerBatch={8}
           windowSize={5}
@@ -296,7 +199,9 @@ const Home = () => {
             width={150}
             height={60}
             text={true}
-            value={allSectionsWorking}
+            value={sections.every(
+              s => s.connected && sectionDataMap[s.id]?.powerStatus,
+            )}
             onToggle={handleToggleAllSections}
             disabled={loading || sections.filter(s => s.connected).length === 0}
           />

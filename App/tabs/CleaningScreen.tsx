@@ -22,17 +22,9 @@ import {
 import CustomTabBar from '../../components/CustomTabBar';
 import PopupModal from '../../components/PopupModal';
 import {getSectionsWithStatus} from '../../utils/db';
-import {
-  readCleaningHoursSetpoint,
-  setCleaningHoursSetpoint,
-} from '../../utils/modbus';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
-import modbusConnectionManager from '../../utils/modbusConnectionManager';
-import useWorkingHoursStore from '../../utils/workingHoursStore';
-import useCleaningHoursStore from '../../utils/cleaningHoursStore';
-import useDpsPressureStore from '../../utils/dpsPressureStore';
-import usePressureButtonStore from '../../utils/pressureButtonStore';
-import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
+import {useSectionDataStore} from '../../utils/useSectionDataStore';
+import {setCleaningHoursSetpoint} from '../../utils/modbus';
 
 interface SectionSummary {
   id: number;
@@ -55,6 +47,14 @@ const CleaningScreen = () => {
   const [isSaving, setIsSaving] = useState(false);
   const {setCurrentSectionId} = useCurrentSectionStore();
 
+  // Use the new centralized store
+  const {
+    sections: sectionDataMap,
+    startPolling,
+    stopPolling,
+    cleanup,
+  } = useSectionDataStore();
+
   const logStatus = useCallback((message: string, isError = false) => {
     console.log(`[Cleaning Screen Status] ${message}`);
     setStatusMessage(message);
@@ -65,11 +65,10 @@ const CleaningScreen = () => {
     return () => clearTimeout(timeoutId);
   }, []);
 
+  // Fetch sections list and handle polling
   useEffect(() => {
     setLoading(true);
-    let isMounted = true;
     getSectionsWithStatus(fetchedSections => {
-      if (!isMounted) return;
       const formattedSections = fetchedSections
         .filter(section => !!section.ip)
         .map(section => ({
@@ -79,7 +78,6 @@ const CleaningScreen = () => {
           working: section.working,
         }));
       setSections(formattedSections);
-
       if (formattedSections.length > 0) {
         if (!selectedSection) {
           setSelectedSection(formattedSections[0]);
@@ -91,57 +89,48 @@ const CleaningScreen = () => {
         setNewValue('');
         setLoading(false);
       }
+      setLoading(false);
     });
     return () => {
-      isMounted = false;
-      useWorkingHoursStore.getState().cleanup();
-      useCleaningHoursStore.getState().cleanup();
-      useDpsPressureStore.getState().cleanup();
-      usePressureButtonStore.getState().cleanup();
-      useSectionsPowerStatusStore.getState().cleanup();
-      modbusConnectionManager.closeAll();
+      cleanup();
     };
-  }, [logStatus, selectedSection]);
+  }, [logStatus, selectedSection, cleanup]);
 
-  // Ensure the TextInput shows only decimal values
-  const fetchCurrentSetpoint = useCallback(async () => {
-    if (!selectedSection || !selectedSection.ip) {
+  // Start polling for the selected section
+  useEffect(() => {
+    if (selectedSection && selectedSection.ip) {
+      startPolling(selectedSection.id, selectedSection.ip);
+    }
+    return () => {
+      if (selectedSection) {
+        stopPolling(selectedSection.id);
+      }
+    };
+  }, [selectedSection, startPolling, stopPolling]);
+
+  // Fetch and update setpoint from the new store
+  useEffect(() => {
+    if (!selectedSection) {
       setCurrentSetpoint(null);
       setNewValue('');
       setLoading(false);
-      if (selectedSection) {
-        logStatus(`Section '${selectedSection.name}' has no IP address.`, true);
-      }
       return;
     }
-
     setLoading(true);
-    setCurrentSetpoint(null);
-    setNewValue('');
-    logStatus(`Fetching cleaning setpoint for ${selectedSection.name}...`);
-
-    try {
-      const value = await readCleaningHoursSetpoint(selectedSection.ip, 502);
-      console.log(`[Debug] Fetched cleaning hours setpoint: ${value}`);
-      const formattedValue = Math.round(value ?? 0).toString(); // Round to whole number
+    const sectionData = sectionDataMap[selectedSection.id];
+    if (sectionData) {
+      const formattedValue = Math.round(
+        sectionData.cleaningSetpoint ?? 0,
+      ).toString();
       setCurrentSetpoint(parseFloat(formattedValue));
-      setNewValue(formattedValue); // Ensure the TextInput shows the whole number
-      logStatus(`Fetched cleaning hours setpoint: ${formattedValue} hours`);
-    } catch (error: any) {
-      console.error(
-        `[Debug] Error fetching cleaning hours setpoint: ${error.message}`,
-      );
-      const errorMsg = `Error fetching setpoint for ${selectedSection.name}: ${error.message}`;
-      logStatus(errorMsg, true);
+      setNewValue(formattedValue);
+      setLoading(false);
+    } else {
       setCurrentSetpoint(null);
-    } finally {
+      setNewValue('');
       setLoading(false);
     }
-  }, [selectedSection, logStatus]);
-
-  useEffect(() => {
-    fetchCurrentSetpoint();
-  }, [fetchCurrentSetpoint]);
+  }, [selectedSection, sectionDataMap]);
 
   const handleSaveChanges = async () => {
     if (!selectedSection || !selectedSection.ip) {

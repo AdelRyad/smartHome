@@ -10,18 +10,6 @@ import {
 import {NavigationContainer} from '@react-navigation/native';
 import {createStackNavigator} from '@react-navigation/stack';
 
-// Import stores
-import useWorkingHoursStore from './utils/workingHoursStore';
-import useCleaningHoursStore from './utils/cleaningHoursStore';
-import useDpsPressureStore from './utils/dpsPressureStore';
-import usePressureButtonStore from './utils/pressureButtonStore';
-import useSectionsPowerStatusStore from './utils/sectionsPowerStatusStore';
-import {initializeWorkingHoursStore} from './utils/workingHoursStore';
-import {initializeCleaningHoursStore} from './utils/cleaningHoursStore';
-import {initializeDpsPressureStore} from './utils/dpsPressureStore';
-import {initializePressureButtonStore} from './utils/pressureButtonStore';
-import modbusConnectionManager from './utils/modbusConnectionManager';
-
 // Import screens and components
 import Home from './App/screens/Home';
 import Section from './App/screens/Section';
@@ -35,21 +23,6 @@ interface ErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
 }
-
-// Simple cleanup function
-const cleanupStores = async () => {
-  try {
-    // Cleanup all stores
-    useWorkingHoursStore.getState().cleanup();
-    useCleaningHoursStore.getState().cleanup();
-    useDpsPressureStore.getState().cleanup();
-    usePressureButtonStore.getState().cleanup();
-    useSectionsPowerStatusStore.getState().cleanup();
-    modbusConnectionManager.closeAll();
-  } catch (error) {
-    console.error('Error during cleanup:', error);
-  }
-};
 
 class ErrorBoundary extends React.Component<
   {children?: React.ReactNode},
@@ -69,7 +42,6 @@ class ErrorBoundary extends React.Component<
   }
 
   handleRetry = async () => {
-    await cleanupStores();
     this.setState({hasError: false, error: null});
   };
 
@@ -103,7 +75,6 @@ const App = () => {
         setIsReady(true);
       } catch (error) {
         console.error('Failed to initialize app:', error);
-        await cleanupStores();
       }
     };
 
@@ -115,16 +86,11 @@ const App = () => {
     const appState = {current: AppState.currentState};
     const handleAppStateChange = async (nextAppState: AppStateStatus) => {
       if (appState.current.match(/active/) && nextAppState === 'background') {
-        await cleanupStores();
       }
       if (
         appState.current.match(/background|inactive/) &&
         nextAppState === 'active'
       ) {
-        initializeWorkingHoursStore();
-        initializeCleaningHoursStore();
-        initializeDpsPressureStore();
-        initializePressureButtonStore();
       }
       appState.current = nextAppState;
     };
@@ -134,7 +100,6 @@ const App = () => {
     );
     return () => {
       subscription.remove();
-      cleanupStores();
     };
   }, []);
 
