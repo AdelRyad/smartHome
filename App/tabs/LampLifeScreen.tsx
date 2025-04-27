@@ -7,7 +7,6 @@ import {
   FlatList,
   TextInput,
   ActivityIndicator,
-  useWindowDimensions,
 } from 'react-native';
 import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
@@ -24,6 +23,11 @@ import {getSectionsWithStatus, getDevicesForSection} from '../../utils/db';
 import {setLampMaxHours} from '../../utils/modbus';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 import useWorkingHoursStore from '../../utils/workingHoursStore';
+import modbusConnectionManager from '../../utils/modbusConnectionManager';
+import useCleaningHoursStore from '../../utils/cleaningHoursStore';
+import useDpsPressureStore from '../../utils/dpsPressureStore';
+import usePressureButtonStore from '../../utils/pressureButtonStore';
+import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 
 interface SectionSummary {
   id: number;
@@ -38,8 +42,6 @@ interface LampHours {
 }
 
 export const LampLifeScreen = () => {
-  const {width, height} = useWindowDimensions();
-  const isPortrait = height > width;
   const {workingHours} = useWorkingHoursStore();
 
   const [sections, setSections] = useState<SectionSummary[]>([]);
@@ -136,7 +138,15 @@ export const LampLifeScreen = () => {
     }, 5000);
 
     // Stop polling on unmount
-    return () => clearInterval(intervalId);
+    return () => {
+      useWorkingHoursStore.getState().cleanup();
+      useCleaningHoursStore.getState().cleanup();
+      useDpsPressureStore.getState().cleanup();
+      usePressureButtonStore.getState().cleanup();
+      useSectionsPowerStatusStore.getState().cleanup();
+      modbusConnectionManager.closeAll();
+      clearInterval(intervalId);
+    };
   }, [setCurrentSectionId]);
 
   // Fetch devices when selected section changes
@@ -161,13 +171,13 @@ export const LampLifeScreen = () => {
     setEdit(false);
   };
 
-  const handleInputChange = (deviceId: number, text: string) => {
+  const handleInputChange = useCallback((deviceId: number, text: string) => {
     const numericText = text.replace(/[^0-9.]/g, '');
     setEditedMaxHours(prev => ({
       ...prev,
       [deviceId]: numericText,
     }));
-  };
+  }, []);
 
   const executeSaveChanges = async () => {
     setModalVisible(false);
@@ -265,53 +275,65 @@ export const LampLifeScreen = () => {
     </TouchableOpacity>
   );
 
-  const renderGridItem = ({item, index}: {item: any; index: number}) => {
-    // Only last 2 grid items should be disabled
-    const isMonitoredLamp = index < 4;
-    const lampData = getLampDataFromStore(item.id);
+  const renderGridItem = useCallback(
+    ({item, index}: {item: any; index: number}) => {
+      // Only last 2 grid items should be disabled
+      const isMonitoredLamp = index < 4;
+      const lampData = getLampDataFromStore(item.id);
 
-    const displayMaxHours =
-      edit && editedMaxHours[item.id] !== undefined
-        ? editedMaxHours[item.id]
-        : lampData.maxHours !== null
-        ? lampData.maxHours?.toString()
-        : 'N/A';
+      const displayMaxHours =
+        edit && editedMaxHours[item.id] !== undefined
+          ? editedMaxHours[item.id]
+          : lampData.maxHours !== null
+          ? lampData.maxHours?.toString()
+          : 'N/A';
 
-    return (
-      <View style={styles.gridItem}>
-        <View style={styles.card}>
-          <View style={styles.cardContent}>
-            <View style={styles.titleContainer}>
-              <View style={styles.iconWrapper}>
-                <LampIcon
-                  fill={isMonitoredLamp ? 'black' : COLORS.gray[400]}
-                  style={styles.icon}
-                />
+      return (
+        <View style={styles.gridItem}>
+          <View style={styles.card}>
+            <View style={styles.cardContent}>
+              <View style={styles.titleContainer}>
+                <View style={styles.iconWrapper}>
+                  <LampIcon
+                    fill={isMonitoredLamp ? 'black' : COLORS.gray[400]}
+                    style={styles.icon}
+                  />
+                </View>
+                <Text style={styles.titleInputReadOnly}>{item.name}</Text>
               </View>
-              <Text style={styles.titleInputReadOnly}>{item.name}</Text>
-            </View>
 
-            <TextInput
-              style={StyleSheet.flatten([
-                styles.daysLeftInput,
-                focusedInputId === item.id ? styles.focusedInput : null,
-                !isMonitoredLamp ? {opacity: 0.5} : null,
-              ])}
-              value={displayMaxHours}
-              editable={edit && isMonitoredLamp && !loading}
-              placeholder="Max Hrs"
-              placeholderTextColor={COLORS.gray[600]}
-              keyboardType="number-pad"
-              onChangeText={text => handleInputChange(item.id, text)}
-              onFocus={() => setFocusedInputId(item.id)}
-              onBlur={() => setFocusedInputId(null)}
-              returnKeyType="done"
-            />
+              <TextInput
+                style={StyleSheet.flatten([
+                  styles.daysLeftInput,
+                  focusedInputId === item.id ? styles.focusedInput : null,
+                  !isMonitoredLamp ? {opacity: 0.5} : null,
+                ])}
+                value={displayMaxHours}
+                editable={edit && isMonitoredLamp && !loading}
+                placeholder="Max Hrs"
+                placeholderTextColor={COLORS.gray[600]}
+                keyboardType="number-pad"
+                onChangeText={text => handleInputChange(item.id, text)}
+                onFocus={() => setFocusedInputId(item.id)}
+                onBlur={() => setFocusedInputId(null)}
+                returnKeyType="done"
+              />
+            </View>
           </View>
         </View>
-      </View>
-    );
-  };
+      );
+    },
+    [
+      edit,
+      focusedInputId,
+      handleInputChange,
+      loading,
+      editedMaxHours,
+      getLampDataFromStore,
+    ],
+  );
+
+  const keyExtractor = useCallback((item: any) => item.id.toString(), []);
 
   return (
     <Layout>
@@ -365,12 +387,11 @@ export const LampLifeScreen = () => {
         <View style={styles.gridContainer}>
           {selectedSection && devices.length > 0 ? (
             <FlatList
-              key={isPortrait ? 'portrait-lamp' : 'landscape-lamp'}
-              numColumns={isPortrait ? 1 : 3}
+              numColumns={3}
               data={devices}
               renderItem={renderGridItem}
-              keyExtractor={item => `device-${item.id}`}
-              columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
+              keyExtractor={keyExtractor}
+              columnWrapperStyle={styles.gridColumnWrapper}
               contentContainerStyle={styles.gridContentContainer}
               showsVerticalScrollIndicator={false}
               extraData={{edit, editedMaxHours, focusedInputId, loading}}

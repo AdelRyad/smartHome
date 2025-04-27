@@ -2,7 +2,7 @@ import React, {memo, useMemo, useCallback} from 'react';
 import {
   View,
   Text,
-  TouchableOpacity,
+  Pressable,
   ActivityIndicator,
   StyleSheet,
 } from 'react-native';
@@ -56,8 +56,11 @@ const CleaningDaysLeft = memo(
             <Text style={styles.daysLeft}>{daysLeft}</Text>
             <Text style={styles.daysLeftSubText}>Days Left</Text>
           </View>
-          <TouchableOpacity
-            style={styleArr}
+          <Pressable
+            style={({pressed}) => [
+              ...styleArr,
+              pressed && !isResetting ? {opacity: 0.7} : null,
+            ]}
             onPress={handleReset}
             disabled={isResetting}>
             {isResetting ? (
@@ -65,7 +68,7 @@ const CleaningDaysLeft = memo(
             ) : (
               <RepeatIcon />
             )}
-          </TouchableOpacity>
+          </Pressable>
         </View>
       </View>
     );

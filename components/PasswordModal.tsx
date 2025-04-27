@@ -1,5 +1,5 @@
 import React, {memo} from 'react';
-import {View, Text, TouchableOpacity} from 'react-native';
+import {View, Text, Pressable} from 'react-native';
 import {LockIcon} from '../icons';
 import PopupModal from './PopupModal';
 
@@ -40,12 +40,15 @@ const PasswordModal = memo(
         ].map((row, rowIndex) => (
           <View key={rowIndex} style={styles.keyRow}>
             {row.map((num, index) => (
-              <TouchableOpacity
+              <Pressable
                 key={index}
-                style={styles.keyButton}
+                style={({pressed}) => [
+                  styles.keyButton,
+                  pressed && {opacity: 0.7},
+                ]}
                 onPress={() => onKeyPress(num)}>
                 <Text style={styles.keyText}>{num}</Text>
-              </TouchableOpacity>
+              </Pressable>
             ))}
           </View>
         ))}

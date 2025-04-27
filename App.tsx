@@ -1,5 +1,12 @@
 import React, {useState, useEffect} from 'react';
-import {View, StyleSheet, Text, TouchableOpacity} from 'react-native';
+import {
+  View,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  AppState,
+  AppStateStatus,
+} from 'react-native';
 import {NavigationContainer} from '@react-navigation/native';
 import {createStackNavigator} from '@react-navigation/stack';
 
@@ -9,6 +16,11 @@ import useCleaningHoursStore from './utils/cleaningHoursStore';
 import useDpsPressureStore from './utils/dpsPressureStore';
 import usePressureButtonStore from './utils/pressureButtonStore';
 import useSectionsPowerStatusStore from './utils/sectionsPowerStatusStore';
+import {initializeWorkingHoursStore} from './utils/workingHoursStore';
+import {initializeCleaningHoursStore} from './utils/cleaningHoursStore';
+import {initializeDpsPressureStore} from './utils/dpsPressureStore';
+import {initializePressureButtonStore} from './utils/pressureButtonStore';
+import modbusConnectionManager from './utils/modbusConnectionManager';
 
 // Import screens and components
 import Home from './App/screens/Home';
@@ -33,13 +45,17 @@ const cleanupStores = async () => {
     useDpsPressureStore.getState().cleanup();
     usePressureButtonStore.getState().cleanup();
     useSectionsPowerStatusStore.getState().cleanup();
+    modbusConnectionManager.closeAll();
   } catch (error) {
     console.error('Error during cleanup:', error);
   }
 };
 
-class ErrorBoundary extends React.Component<{}, ErrorBoundaryState> {
-  constructor(props: {}) {
+class ErrorBoundary extends React.Component<
+  {children?: React.ReactNode},
+  ErrorBoundaryState
+> {
+  constructor(props: {children?: React.ReactNode}) {
     super(props);
     this.state = {hasError: false, error: null};
   }
@@ -94,6 +110,34 @@ const App = () => {
     initializeApp();
   }, []);
 
+  // Centralized AppState listener for cleanup
+  useEffect(() => {
+    const appState = {current: AppState.currentState};
+    const handleAppStateChange = async (nextAppState: AppStateStatus) => {
+      if (appState.current.match(/active/) && nextAppState === 'background') {
+        await cleanupStores();
+      }
+      if (
+        appState.current.match(/background|inactive/) &&
+        nextAppState === 'active'
+      ) {
+        initializeWorkingHoursStore();
+        initializeCleaningHoursStore();
+        initializeDpsPressureStore();
+        initializePressureButtonStore();
+      }
+      appState.current = nextAppState;
+    };
+    const subscription = AppState.addEventListener(
+      'change',
+      handleAppStateChange,
+    );
+    return () => {
+      subscription.remove();
+      cleanupStores();
+    };
+  }, []);
+
   if (!isReady) {
     return (
       <View style={styles.loadingContainer}>
@@ -112,7 +156,7 @@ const App = () => {
           <Stack.Screen name="Home" component={Home} />
           <Stack.Screen name="Settings" component={SettingsTabs} />
           <Stack.Screen name="Section" component={Section} />
-          <Stack.Screen name="Contact" component={Contact} />
+          <Stack.Screen name="ContactUs" component={Contact} />
         </Stack.Navigator>
       </NavigationContainer>
     </ErrorBoundary>

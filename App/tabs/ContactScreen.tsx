@@ -20,11 +20,16 @@ import {
   MailIcon,
   RefrenceIcon,
 } from '../../icons';
-import {useWindowDimensions} from 'react-native';
 import CustomTabBar from '../../components/CustomTabBar';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import PopupModal from '../../components/PopupModal';
 import {getContactInfo, updateContactInfo} from '../../utils/db';
+import modbusConnectionManager from '../../utils/modbusConnectionManager';
+import useWorkingHoursStore from '../../utils/workingHoursStore';
+import useCleaningHoursStore from '../../utils/cleaningHoursStore';
+import useDpsPressureStore from '../../utils/dpsPressureStore';
+import usePressureButtonStore from '../../utils/pressureButtonStore';
+import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 
 interface ContactField {
   key: keyof ContactInfoState;
@@ -138,9 +143,6 @@ const contactFields: ContactField[] = [
 ];
 
 const ContactScreen = () => {
-  const {width, height} = useWindowDimensions();
-  const isPortrait = height > width;
-
   const [datePickerValue, setDatePickerValue] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
@@ -176,6 +178,14 @@ const ContactScreen = () => {
         setDatePickerValue(new Date());
       }
     });
+    return () => {
+      useWorkingHoursStore.getState().cleanup();
+      useCleaningHoursStore.getState().cleanup();
+      useDpsPressureStore.getState().cleanup();
+      usePressureButtonStore.getState().cleanup();
+      useSectionsPowerStatusStore.getState().cleanup();
+      modbusConnectionManager.closeAll();
+    };
   }, []);
 
   // Stable callback for input changes
@@ -220,14 +230,20 @@ const ContactScreen = () => {
   const renderGridItem = useCallback(
     ({item}: {item: ContactField}) => (
       <ContactFieldItem
+        key={item.key}
         item={item}
-        value={edit ? editedContactInfo[item.key] : contactInfo[item.key]}
+        value={editedContactInfo[item.key] || ''}
         isEdit={edit}
         onChange={value => handleInputChange(item.key, value)}
         onDatePress={handleDatePress}
       />
     ),
-    [edit, editedContactInfo, contactInfo, handleInputChange, handleDatePress],
+    [editedContactInfo, edit, handleInputChange, handleDatePress],
+  );
+
+  const keyExtractor = useCallback(
+    (item: ContactField) => item.key.toString(),
+    [],
   );
 
   return (
@@ -265,12 +281,12 @@ const ContactScreen = () => {
       <View style={styles.container}>
         <View style={styles.gridContainer}>
           <FlatList
-            key={isPortrait ? 'portrait' : 'landscape'}
-            numColumns={isPortrait ? 1 : 2}
+            key={'landscape'}
+            numColumns={2}
             data={contactFields}
             renderItem={renderGridItem}
-            keyExtractor={item => item.key}
-            columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
+            keyExtractor={keyExtractor}
+            columnWrapperStyle={styles.gridColumnWrapper}
             contentContainerStyle={styles.gridContentContainer}
             showsVerticalScrollIndicator={false}
             initialNumToRender={5}

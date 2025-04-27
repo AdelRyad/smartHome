@@ -1,11 +1,5 @@
 import React, {useEffect, useState, useMemo, memo, useCallback} from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-  useWindowDimensions,
-} from 'react-native';
+import {View, Text, StyleSheet, FlatList} from 'react-native';
 import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
 import {
@@ -117,8 +111,6 @@ const QRCodeInfo = memo(() => (
 ));
 
 const ContactUsScreen = () => {
-  const {width, height} = useWindowDimensions();
-  const isPortrait = height > width;
   const [contactInfo, setContactInfo] = useState<ContactInfo | null>(null);
 
   useEffect(() => {
@@ -166,19 +158,14 @@ const ContactUsScreen = () => {
           Use contact information below to get help quickly
         </Text>
       </View>
-      <View
-        style={[
-          styles.container,
-          {flexDirection: isPortrait ? 'column-reverse' : 'row'},
-        ]}>
+      <View style={[styles.container, {flexDirection: 'row'}]}>
         <View style={styles.gridContainer}>
           <FlatList
-            key={isPortrait ? 'portrait' : 'landscape'}
-            numColumns={isPortrait ? 1 : 2}
+            numColumns={2}
             data={contactFields}
             renderItem={renderGridItem}
             keyExtractor={item => item.key}
-            columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
+            columnWrapperStyle={styles.gridColumnWrapper}
             contentContainerStyle={styles.gridContentContainer}
             showsVerticalScrollIndicator={false}
             initialNumToRender={4}

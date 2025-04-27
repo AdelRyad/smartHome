@@ -1,7 +1,6 @@
 import {create} from 'zustand';
 import {readLampHours, readLifeHoursSetpoint} from './modbus';
 import {getSectionsWithStatus, getDevicesForSection} from './db';
-import {AppState} from 'react-native';
 import modbusConnectionManager from './modbusConnectionManager';
 
 interface LampHoursData {
@@ -33,13 +32,57 @@ const RETRY_DELAY = 1000;
 
 const GLOBAL_POLLING_REGISTRY: Record<string, NodeJS.Timeout> = {};
 
+let workingHoursSectionDiscoveryInterval: NodeJS.Timeout | null = null;
+
 function getPollingKey(sectionId: number) {
   return `workingHours:${sectionId}`;
 }
 
+async function initializeWorkingHoursStore() {
+  useWorkingHoursStore.getState().cleanup();
+  try {
+    const sections = await new Promise<any[]>(resolve => {
+      getSectionsWithStatus(resolve);
+    });
+    if (!sections || !Array.isArray(sections)) {
+      throw new Error('Invalid sections data received');
+    }
+    sections.forEach(section => {
+      if (section?.id && section?.ip) {
+        useWorkingHoursStore.getState().startPolling(section.id, section.ip);
+      }
+    });
+    // Optionally, add periodic section discovery as in other stores
+    if (workingHoursSectionDiscoveryInterval) {
+      clearInterval(workingHoursSectionDiscoveryInterval);
+    }
+    workingHoursSectionDiscoveryInterval = setInterval(async () => {
+      const latestSections = await new Promise<any[]>(resolve => {
+        getSectionsWithStatus(resolve);
+      });
+      latestSections.forEach(section => {
+        if (section?.id && section?.ip) {
+          const key = getPollingKey(section.id);
+          if (!GLOBAL_POLLING_REGISTRY[key]) {
+            useWorkingHoursStore
+              .getState()
+              .startPolling(section.id, section.ip);
+          }
+        }
+      });
+    }, 60000);
+  } catch (error) {
+    console.error('Error initializing working hours store:', error);
+    useWorkingHoursStore.setState({
+      error: `Initialization failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      isLoading: false,
+    });
+  }
+}
+
 const useWorkingHoursStore = create<WorkingHoursState>((set, _get) => {
-  let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
-    null;
   let isFirstRequest = true;
 
   async function getSafeInterval(defaultInterval: number) {
@@ -251,54 +294,7 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, _get) => {
 
   const cleanup = () => {
     stopAllPolling();
-    if (appStateListener) {
-      appStateListener.remove();
-      appStateListener = null;
-    }
   };
-
-  const initialize = async () => {
-    cleanup();
-
-    try {
-      const sections = await new Promise<any[]>(resolve => {
-        getSectionsWithStatus(resolve);
-      });
-
-      if (!sections || !Array.isArray(sections)) {
-        throw new Error('Invalid sections data received');
-      }
-
-      console.log(
-        '[Polling Init] Sections:',
-        sections.map(s => ({id: s.id, ip: s.ip})),
-      );
-
-      sections.forEach(section => {
-        if (section?.id && section?.ip) {
-          startPolling(section.id, section.ip);
-        }
-      });
-
-      appStateListener = AppState.addEventListener('change', nextAppState => {
-        if (nextAppState === 'active') {
-          initialize();
-        } else if (nextAppState === 'background') {
-          cleanup();
-        }
-      });
-    } catch (error) {
-      console.error('Error initializing cleaning hours store:', error);
-      set({
-        error: `Initialization failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        isLoading: false,
-      });
-    }
-  };
-
-  initialize();
 
   return {
     workingHours: {},
@@ -312,3 +308,4 @@ const useWorkingHoursStore = create<WorkingHoursState>((set, _get) => {
 });
 
 export default useWorkingHoursStore;
+export {initializeWorkingHoursStore};

@@ -1,7 +1,6 @@
 import {create} from 'zustand';
 import {readPressureButton} from './modbus';
 import {getSectionsWithStatus} from './db';
-import {AppState} from 'react-native';
 import modbusConnectionManager from './modbusConnectionManager';
 
 interface PressureButtonState {
@@ -32,13 +31,30 @@ function getPollingKey(sectionId: number) {
   return `pressureButton:${sectionId}`;
 }
 
+async function initializePressureButtonStore() {
+  usePressureButtonStore.getState().cleanup();
+  try {
+    const sections = await new Promise<any[]>(resolve => {
+      getSectionsWithStatus(resolve);
+    });
+    if (!sections || !Array.isArray(sections)) {
+      throw new Error('Invalid sections data received');
+    }
+    sections.forEach(section => {
+      if (section?.id && section?.ip) {
+        usePressureButtonStore.getState().startPolling(section.id, section.ip);
+      }
+    });
+  } catch (error) {
+    console.error('Error initializing pressure button store:', error);
+  }
+}
+
 const usePressureButtonStore = create<PressureButtonState>((set, _get) => {
   let activeRequests: Record<number, boolean> = {};
   let requestQueue: Array<{sectionId: number; ip: string; timestamp: number}> =
     [];
   let isProcessing = false;
-  let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
-    null;
 
   async function getSafeInterval(defaultInterval: number) {
     // @ts-ignore: performance.memory is not standard in all environments
@@ -224,43 +240,7 @@ const usePressureButtonStore = create<PressureButtonState>((set, _get) => {
       });
     activeRequests = {};
     requestQueue = [];
-    if (appStateListener) {
-      appStateListener.remove();
-      appStateListener = null;
-    }
   };
-
-  const initialize = async () => {
-    cleanup();
-
-    try {
-      const sections = await new Promise<any[]>(resolve => {
-        getSectionsWithStatus(resolve);
-      });
-
-      if (!sections || !Array.isArray(sections)) {
-        throw new Error('Invalid sections data received');
-      }
-
-      sections.forEach(section => {
-        if (section?.id && section?.ip) {
-          startPolling(section.id, section.ip);
-        }
-      });
-
-      appStateListener = AppState.addEventListener('change', nextAppState => {
-        if (nextAppState === 'active') {
-          initialize();
-        } else if (nextAppState === 'background') {
-          cleanup();
-        }
-      });
-    } catch (error) {
-      console.error('Error initializing DPS status:', error);
-    }
-  };
-
-  initialize();
 
   return {
     sections: {},
@@ -272,4 +252,5 @@ const usePressureButtonStore = create<PressureButtonState>((set, _get) => {
   };
 });
 
+export {initializePressureButtonStore};
 export default usePressureButtonStore;

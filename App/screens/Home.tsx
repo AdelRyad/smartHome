@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   FlatList,
-  useWindowDimensions,
   ActivityIndicator,
 } from 'react-native';
 import Layout from '../../components/Layout';
@@ -17,6 +16,11 @@ import {useStatusStore} from '../../utils/statusStore';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
 import SectionCard from '../../components/SectionCard';
 import WarningSummary from '../../components/WarningSummary';
+import modbusConnectionManager from '../../utils/modbusConnectionManager';
+import useWorkingHoursStore from '../../utils/workingHoursStore';
+import useCleaningHoursStore from '../../utils/cleaningHoursStore';
+import useDpsPressureStore from '../../utils/dpsPressureStore';
+import usePressureButtonStore from '../../utils/pressureButtonStore';
 
 type RootStackParamList = {
   Home: undefined;
@@ -31,8 +35,7 @@ type RootStackParamList = {
 
 const Home = () => {
   const navigation = useNavigation<NavigationProp<RootStackParamList>>();
-  const {width, height} = useWindowDimensions();
-  const isPortrait = height > width;
+
   const {setCurrentSectionId} = useCurrentSectionStore();
 
   const [sections, setSections] = useState<
@@ -105,53 +108,16 @@ const Home = () => {
   useEffect(() => {
     fetchData();
     const unsubscribe = navigation.addListener('focus', fetchData);
-    return unsubscribe;
+    return () => {
+      useWorkingHoursStore.getState().cleanup();
+      useCleaningHoursStore.getState().cleanup();
+      useDpsPressureStore.getState().cleanup();
+      usePressureButtonStore.getState().cleanup();
+      useSectionsPowerStatusStore.getState().cleanup();
+      modbusConnectionManager.closeAll();
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
   }, [fetchData, navigation]);
-
-  const handleToggleSwitch = useCallback(
-    async (index: number) => {
-      const section = sections[index];
-      if (!section.connected || !section.ip) {
-        return;
-      }
-      setLoading(true);
-      const currentStatus =
-        powerStatusStore.sections[section.id]?.isPowered ?? false;
-      const desiredState = !currentStatus;
-
-      try {
-        // Update power status first
-        await powerStatusStore.setPowerStatus(
-          section.id,
-          section.ip,
-          desiredState,
-        );
-
-        // Update database
-        await new Promise<void>((resolve, reject) => {
-          updateSection(
-            section.id,
-            section.name,
-            section.ip!,
-            section.cleaningDays,
-            desiredState,
-            (success: boolean) => {
-              if (success) {
-                resolve();
-              } else {
-                reject(new Error('DB Update Failed'));
-              }
-            },
-          );
-        });
-      } catch (error) {
-        console.error('Error toggling switch:', error);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [sections, powerStatusStore],
-  );
 
   const handleToggleAllSections = useCallback(
     async (newStatus: boolean) => {
@@ -216,6 +182,54 @@ const Home = () => {
     [sections, powerStatusStore, fetchData],
   );
 
+  const handleToggleSwitch = useCallback(
+    async (index: number) => {
+      setLoading(true);
+      const section = sections[index];
+      if (!section.connected || !section.ip) {
+        setLoading(false);
+        return;
+      }
+      const currentStatus =
+        powerStatusStore.sections[section.id]?.isPowered ?? false;
+      const newStatus = !currentStatus;
+      try {
+        // Update power status for the section
+        await powerStatusStore.setPowerStatus(
+          section.id,
+          section.ip!,
+          newStatus,
+        );
+        // Update database for the section
+        await updateSection(
+          section.id,
+          section.name,
+          section.ip!,
+          section.cleaningDays,
+          newStatus,
+          (success: boolean) => {
+            if (!success) {
+              console.error(`Failed to update DB for section ${section.id}`);
+            }
+          },
+        );
+        // Update local state
+        const finalSectionsState = sections.map((s, i) =>
+          i === index ? {...s, working: newStatus} : s,
+        );
+        setSections(finalSectionsState);
+        setAllSectionsWorking(sections.every(s => s.connected && s.working));
+      } catch (error) {
+        console.error('Error toggling section:', error);
+        // On error, refresh section state
+        fetchData();
+      } finally {
+        setLoading(false);
+      }
+    },
+    [sections, powerStatusStore, fetchData],
+  );
+
   const handleNavigate = useCallback(
     (item: any) => {
       if (item.connected) {
@@ -232,7 +246,7 @@ const Home = () => {
     [navigation, setCurrentSectionId],
   );
 
-  const renderGridItem = useCallback(
+  const renderItem = useCallback(
     ({item, index}: {item: any; index: number}) => (
       <SectionCard
         item={item}
@@ -245,6 +259,8 @@ const Home = () => {
     ),
     [loading, powerStatusStore.sections, handleToggleSwitch, handleNavigate],
   );
+
+  const keyExtractor = useCallback((item: any) => item.id.toString(), []);
 
   return (
     <Layout>
@@ -261,11 +277,10 @@ const Home = () => {
         )}
 
         <FlatList
-          key={isPortrait ? 'portrait' : 'landscape'}
           data={sections}
-          renderItem={renderGridItem}
-          keyExtractor={item => item.id.toString()}
-          numColumns={isPortrait ? 2 : 4}
+          renderItem={renderItem}
+          keyExtractor={keyExtractor}
+          numColumns={4}
           columnWrapperStyle={styles.gridColumnWrapper}
           contentContainerStyle={styles.gridContentContainer}
           showsVerticalScrollIndicator={false}

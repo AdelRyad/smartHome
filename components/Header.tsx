@@ -2,7 +2,7 @@ import React, {useState, useRef, useMemo, useCallback} from 'react';
 import {
   View,
   StyleSheet,
-  TouchableOpacity,
+  Pressable,
   ScrollView,
   LayoutAnimation,
   UIManager,
@@ -176,28 +176,34 @@ const Header = () => {
         onKeyPress={handleKeyPress}
         styles={styles}
       />
-      <TouchableOpacity
+      <Pressable
         onLongPress={() => {
           setIsModalVisible(true);
           setPassword(['', '', '', '']);
         }}
-        delayLongPress={5000}>
+        delayLongPress={5000}
+        style={({pressed}) => pressed && {opacity: 0.7}}>
         <Logo />
-      </TouchableOpacity>
+      </Pressable>
       <View style={styles.nav}>
         <View style={styles.navLinks}>
-          <TouchableOpacity
-            style={[styles.link, currentPage === 'Home' && styles.activeLink]}
+          <Pressable
+            style={({pressed}) => [
+              styles.link,
+              currentPage === 'Home' && styles.activeLink,
+              pressed && {opacity: 0.7},
+            ]}
             onPress={handleNavigateHome}>
             {currentPage === 'Home' ? <HomeIcon /> : <InActiveHomeIcon />}
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[
+          </Pressable>
+          <Pressable
+            style={({pressed}) => [
               styles.link,
               currentPage !== 'ContactUs' &&
                 currentPage !== 'Home' &&
                 currentPage !== 'Section' &&
                 styles.activeLink,
+              pressed && {opacity: 0.7},
             ]}
             onPress={handleNavigateSettings}>
             {currentPage !== 'ContactUs' &&
@@ -207,7 +213,7 @@ const Header = () => {
             ) : (
               <SettingsIcon />
             )}
-          </TouchableOpacity>
+          </Pressable>
         </View>
         <ScrollView
           horizontal
@@ -227,13 +233,14 @@ const Header = () => {
               ))}
             </View>
             <View style={styles.actions}>
-              <TouchableOpacity
-                style={[
+              <Pressable
+                style={({pressed}) => [
                   styles.supportButton,
                   {
                     backgroundColor:
                       currentPage === 'ContactUs' ? COLORS.teal[500] : '#fff',
                   },
+                  pressed && {opacity: 0.7},
                 ]}
                 onPress={handleNavigateContact}>
                 <CustomerServiceIcon
@@ -241,8 +248,8 @@ const Header = () => {
                   width={30}
                   height={30}
                 />
-              </TouchableOpacity>
-              <TouchableOpacity
+              </Pressable>
+              <View
                 style={[
                   styles.warningButton,
                   {
@@ -255,7 +262,7 @@ const Header = () => {
                   },
                 ]}>
                 <CheckIcon fill={'#fff'} style={styles.checkIcon} />
-              </TouchableOpacity>
+              </View>
             </View>
           </View>
         </ScrollView>

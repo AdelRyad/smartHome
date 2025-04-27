@@ -4,7 +4,6 @@ import {
   readSingleLampCleaningRunHours,
 } from './modbus';
 import {getSectionsWithStatus, getDevicesForSection} from './db';
-import {AppState} from 'react-native';
 import modbusConnectionManager from './modbusConnectionManager';
 
 interface CleaningHoursData {
@@ -40,11 +39,65 @@ function getPollingKey(sectionId: number) {
   return `cleaningHours:${sectionId}`;
 }
 
+let sectionDiscoveryInterval: NodeJS.Timeout | null = null;
+
+async function initializeCleaningHoursStore() {
+  useCleaningHoursStore.getState().cleanup();
+  try {
+    const sections = await new Promise<any[]>(resolve => {
+      getSectionsWithStatus(resolve);
+    });
+    // Add null/undefined check for sections
+    if (!sections || !Array.isArray(sections)) {
+      throw new Error('Invalid sections data received');
+    }
+    console.log(
+      '[Polling Init] Sections:',
+      sections.map(s => ({id: s.id, ip: s.ip})),
+    );
+    sections.forEach(section => {
+      // Add proper null checks for section and its properties
+      if (section?.id && section?.ip) {
+        useCleaningHoursStore.getState().startPolling(section.id, section.ip);
+      }
+    });
+    // Periodically check for new sections every 60 seconds
+    if (sectionDiscoveryInterval) {
+      clearInterval(sectionDiscoveryInterval);
+    }
+    sectionDiscoveryInterval = setInterval(async () => {
+      const latestSections = await new Promise<any[]>(resolve => {
+        getSectionsWithStatus(resolve);
+      });
+      latestSections.forEach(section => {
+        if (section?.id && section?.ip) {
+          const key = getPollingKey(section.id);
+          if (!GLOBAL_POLLING_REGISTRY[key]) {
+            console.log(
+              '[Polling Init] Detected new section, starting polling:',
+              section.id,
+              section.ip,
+            );
+            useCleaningHoursStore
+              .getState()
+              .startPolling(section.id, section.ip);
+          }
+        }
+      });
+    }, 60000);
+  } catch (error) {
+    console.error('Error initializing cleaning hours store:', error);
+    useCleaningHoursStore.setState({
+      error: `Initialization failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      isLoading: false,
+    });
+  }
+}
+
 const useCleaningHoursStore = create<CleaningHoursState>((set, _get) => {
-  let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
-    null;
   let isFirstRequest = true;
-  let sectionDiscoveryInterval: NodeJS.Timeout | null = null;
 
   async function getSafeInterval(defaultInterval: number) {
     // @ts-ignore: performance.memory is not standard in all environments
@@ -219,82 +272,11 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, _get) => {
 
   const cleanup = () => {
     stopAllPolling();
-    if (appStateListener) {
-      appStateListener.remove();
-      appStateListener = null;
-    }
     if (sectionDiscoveryInterval) {
       clearInterval(sectionDiscoveryInterval);
       sectionDiscoveryInterval = null;
     }
   };
-
-  const initialize = async () => {
-    cleanup();
-
-    try {
-      const sections = await new Promise<any[]>(resolve => {
-        getSectionsWithStatus(resolve);
-      });
-
-      // Add null/undefined check for sections
-      if (!sections || !Array.isArray(sections)) {
-        throw new Error('Invalid sections data received');
-      }
-      console.log(
-        '[Polling Init] Sections:',
-        sections.map(s => ({id: s.id, ip: s.ip})),
-      );
-
-      sections.forEach(section => {
-        // Add proper null checks for section and its properties
-        if (section?.id && section?.ip) {
-          startPolling(section.id, section.ip);
-        }
-      });
-
-      // Handle app state changes
-      appStateListener = AppState.addEventListener('change', nextAppState => {
-        if (nextAppState === 'active') {
-          initialize();
-        } else if (nextAppState === 'background') {
-          cleanup();
-        }
-      });
-
-      // Periodically check for new sections every 60 seconds
-      if (sectionDiscoveryInterval) {
-        clearInterval(sectionDiscoveryInterval);
-      }
-      sectionDiscoveryInterval = setInterval(async () => {
-        const latestSections = await new Promise<any[]>(resolve => {
-          getSectionsWithStatus(resolve);
-        });
-        latestSections.forEach(section => {
-          if (section?.id && section?.ip) {
-            const key = getPollingKey(section.id);
-            if (!GLOBAL_POLLING_REGISTRY[key]) {
-              console.log(
-                '[Polling Init] Detected new section, starting polling:',
-                section.id,
-                section.ip,
-              );
-              startPolling(section.id, section.ip);
-            }
-          }
-        });
-      }, 60000);
-    } catch (error) {
-      console.error('Error initializing cleaning hours store:', error);
-      set({
-        error: `Initialization failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        isLoading: false,
-      });
-    }
-  };
-  initialize();
 
   return {
     remainingCleaningHours: {},
@@ -307,4 +289,5 @@ const useCleaningHoursStore = create<CleaningHoursState>((set, _get) => {
   };
 });
 
+export {initializeCleaningHoursStore};
 export default useCleaningHoursStore;

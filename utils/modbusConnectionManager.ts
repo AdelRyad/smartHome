@@ -340,6 +340,34 @@ class ModbusConnectionManager {
     }
     this.connections.clear();
   }
+
+  public closeConnection(ip: string, port: number) {
+    const key = this.getKey(ip, port);
+    const state = this.connections.get(key);
+    if (!state) return;
+    this.log(`Force closing connection to ${state.ip}:${state.port}`);
+    if (state.client && !state.client.destroyed) {
+      state.client.destroy();
+    }
+    if (state.watchdogTimeout) {
+      clearTimeout(state.watchdogTimeout);
+      state.watchdogTimeout = undefined;
+    }
+    while (state.queue.length > 0) {
+      const pending = state.queue.shift();
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error('Connection closed'));
+      }
+    }
+    if (state.reconnectTimeout) {
+      clearTimeout(state.reconnectTimeout);
+      state.reconnectTimeout = undefined;
+    }
+    state.isConnected = false;
+    state.isConnecting = false;
+    this.connections.delete(key);
+  }
 }
 
 const modbusConnectionManager = new ModbusConnectionManager();

@@ -3,7 +3,6 @@ import {View, Text, TouchableOpacity, StyleSheet, FlatList} from 'react-native';
 import Layout from '../../components/Layout';
 import {COLORS} from '../../constants/colors';
 import {CloseIcon, LampIcon, RemoveIcon, RepeatIcon} from '../../icons';
-import {useWindowDimensions} from 'react-native';
 import {useRoute} from '@react-navigation/native';
 import {getDevicesForSection, getSectionsWithStatus} from '../../utils/db';
 import {resetLampHours, resetCleaningHours} from '../../utils/modbus';
@@ -14,6 +13,10 @@ import CleaningDaysLeft from '../../components/CleaningDaysLeft';
 import GridItem from '../../components/GridItem';
 import PasswordModal from '../../components/PasswordModal';
 import SectionResetModal from '../../components/SectionResetModal';
+import modbusConnectionManager from '../../utils/modbusConnectionManager';
+import useDpsPressureStore from '../../utils/dpsPressureStore';
+import usePressureButtonStore from '../../utils/pressureButtonStore';
+import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 
 type RouteParams = {
   sectionId: string;
@@ -22,8 +25,6 @@ type RouteParams = {
 const Section = () => {
   const route = useRoute<{key: string; name: string; params: RouteParams}>();
   const {sectionId} = route.params;
-  const {width, height} = useWindowDimensions();
-  const isPortrait = height > width;
 
   // State management
   const [editLifeHours, setEditLifeHours] = useState(false);
@@ -201,17 +202,17 @@ const Section = () => {
       setSections(sectionsWithIp);
 
       const currentSection = sectionsWithIp.find(sec => sec.id === +sectionId);
-      if (currentSection) {
-        setSection(currentSection);
-      } else if (sectionsWithIp.length > 0) {
-        setSection(sectionsWithIp[0]);
-      } else {
-        logStatus('No sections with valid IP addresses found.', true);
-        setSection(null);
-        setDevices([]);
-      }
+      setSection(currentSection || {id: sectionId});
     });
-  }, [sectionId, logStatus]);
+    return () => {
+      useWorkingHoursStore.getState().cleanup();
+      useCleaningHoursStore.getState().cleanup();
+      useDpsPressureStore.getState().cleanup();
+      usePressureButtonStore.getState().cleanup();
+      useSectionsPowerStatusStore.getState().cleanup();
+      modbusConnectionManager.closeAll();
+    };
+  }, [sectionId]);
 
   useEffect(() => {
     if (section?.ip) {
@@ -234,20 +235,6 @@ const Section = () => {
       setDevices([]);
     }
   }, [section, logStatus]);
-
-  useEffect(() => {
-    return () => {
-      // Cleanup pollers and connections when component unmounts
-      if (section?.id) {
-        useWorkingStore.cleanup();
-        useCleaningStore.cleanup();
-      }
-      setSelectedDevices([]);
-      setDevices(null);
-      setSection(null);
-      setStatusMessage('');
-    };
-  }, []);
 
   useEffect(() => {
     const errorHandler = (error: Error) => {
@@ -325,28 +312,20 @@ const Section = () => {
     [],
   );
 
-  const renderGridItem = useCallback(
-    ({item}: {item: any}) => {
-      // Validate item data before rendering
-      if (!item?.id) {
-        console.warn('Invalid grid item:', item);
-        return null;
-      }
-
-      return (
-        <GridItem
-          key={item.id}
-          item={item}
-          editLifeHours={editLifeHours}
-          selectedDevices={selectedDevices}
-          workingHours={workingHours}
-          cleaningData={cleaningData}
-          currentSectionId={currentSectionId ?? -1}
-          onSelectDevice={handleSelectDevice}
-          onLongPress={handleLongPress}
-        />
-      );
-    },
+  const renderDeviceItem = useCallback(
+    ({item}: {item: any}) => (
+      <GridItem
+        key={item.id}
+        item={item}
+        editLifeHours={editLifeHours}
+        selectedDevices={selectedDevices}
+        workingHours={workingHours}
+        cleaningData={cleaningData}
+        currentSectionId={currentSectionId ?? -1}
+        onSelectDevice={handleSelectDevice}
+        onLongPress={handleLongPress}
+      />
+    ),
     [
       editLifeHours,
       selectedDevices,
@@ -358,19 +337,7 @@ const Section = () => {
     ],
   );
 
-  const getItemLayout = useCallback(
-    (_: any, index: number) => ({
-      length: 280, // Fixed height of grid items
-      offset: 280 * Math.floor(index / (isPortrait ? 1 : 3)),
-      index,
-    }),
-    [isPortrait],
-  );
-
-  const keyExtractor = useCallback(
-    (item: any) => item?.id?.toString() ?? `fallback-key-${Math.random()}`,
-    [],
-  );
+  const keyExtractor = useCallback((item: any) => item.id.toString(), []);
 
   return (
     <Layout>
@@ -454,35 +421,13 @@ const Section = () => {
 
         <View style={styles.gridContainer}>
           <FlatList
-            key={isPortrait ? 'portrait' : 'landscape'}
-            numColumns={isPortrait ? 1 : 3}
-            data={devices ?? []}
-            renderItem={renderGridItem}
+            data={devices}
+            renderItem={renderDeviceItem}
             keyExtractor={keyExtractor}
-            getItemLayout={getItemLayout}
-            columnWrapperStyle={isPortrait ? null : styles.gridColumnWrapper}
+            numColumns={3}
+            columnWrapperStyle={styles.gridColumnWrapper}
             contentContainerStyle={styles.gridContentContainer}
             showsVerticalScrollIndicator={false}
-            ListEmptyComponent={
-              <View style={styles.emptyListContainer}>
-                <Text>
-                  {devices === null ? 'Loading...' : 'No Devices Found'}
-                </Text>
-              </View>
-            }
-            extraData={{
-              editLifeHours,
-              selectedDevices,
-            }}
-            removeClippedSubviews={true}
-            maxToRenderPerBatch={6}
-            windowSize={5}
-            updateCellsBatchingPeriod={50}
-            initialNumToRender={6}
-            onEndReachedThreshold={0.5}
-            maintainVisibleContentPosition={{
-              minIndexForVisible: 0,
-            }}
           />
         </View>
       </View>

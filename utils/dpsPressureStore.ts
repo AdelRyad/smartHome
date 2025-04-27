@@ -1,7 +1,6 @@
 import {create} from 'zustand';
 import {readDPS} from './modbus';
 import {getSectionsWithStatus} from './db';
-import {AppState} from 'react-native';
 import modbusConnectionManager from './modbusConnectionManager';
 
 interface DPSState {
@@ -31,10 +30,26 @@ function getPollingKey(sectionId: number) {
   return `dpsPressure:${sectionId}`;
 }
 
-const useDpsPressureStore = create<DPSState>((set, _get) => {
-  let appStateListener: ReturnType<typeof AppState.addEventListener> | null =
-    null;
+async function initializeDpsPressureStore() {
+  useDpsPressureStore.getState().cleanup();
+  try {
+    const sections = await new Promise<any[]>(resolve => {
+      getSectionsWithStatus(resolve);
+    });
+    if (!sections || !Array.isArray(sections)) {
+      throw new Error('Invalid sections data received');
+    }
+    sections.forEach(section => {
+      if (section?.id && section?.ip) {
+        useDpsPressureStore.getState().startPolling(section.id, section.ip);
+      }
+    });
+  } catch (error) {
+    console.error('Error initializing DPS status:', error);
+  }
+}
 
+const useDpsPressureStore = create<DPSState>((set, _get) => {
   const fetchDpsStatus = async (sectionId: number, ip: string) => {
     if (modbusConnectionManager.isSuspended(ip, 502)) {
       console.log(
@@ -159,42 +174,7 @@ const useDpsPressureStore = create<DPSState>((set, _get) => {
         clearInterval(GLOBAL_POLLING_REGISTRY[key]);
         delete GLOBAL_POLLING_REGISTRY[key];
       });
-    if (appStateListener) {
-      appStateListener.remove();
-      appStateListener = null;
-    }
   };
-
-  const initialize = async () => {
-    cleanup();
-
-    try {
-      const sections = await new Promise<any[]>(resolve => {
-        getSectionsWithStatus(resolve);
-      });
-
-      if (!sections || !Array.isArray(sections)) {
-        throw new Error('Invalid sections data received');
-      }
-
-      sections.forEach(section => {
-        if (section?.id && section?.ip) {
-          startPolling(section.id, section.ip);
-        }
-      });
-
-      appStateListener = AppState.addEventListener('change', nextAppState => {
-        if (nextAppState === 'active') {
-          initialize();
-        } else if (nextAppState === 'background') {
-          cleanup();
-        }
-      });
-    } catch (error) {
-      console.error('Error initializing DPS status:', error);
-    }
-  };
-  initialize();
 
   return {
     sections: {},
@@ -206,4 +186,5 @@ const useDpsPressureStore = create<DPSState>((set, _get) => {
   };
 });
 
+export {initializeDpsPressureStore};
 export default useDpsPressureStore;

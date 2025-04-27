@@ -1,3 +1,4 @@
+import {memo} from 'react';
 import Logo from '../assets/logo.svg';
 import HomeIcon from '../assets/home.svg';
 import SettingsIcon from '../assets/settings.svg';
@@ -27,33 +28,62 @@ import RemoveIcon from '../assets/remove.svg';
 import FanIcon from '../assets/fan.svg';
 import Settings2Icon from '../assets/settings2.svg';
 
+export const MemoLogo = memo(Logo);
+export const MemoHomeIcon = memo(HomeIcon);
+export const MemoSettingsIcon = memo(SettingsIcon);
+export const MemoLampIcon = memo(LampIcon);
+export const MemoGridIcon = memo(GridIcon);
+export const MemoDoorIcon = memo(DoorIcon);
+export const MemoCleaningIcon = memo(CleaningIcon);
+export const MemoCheckIcon = memo(CheckIcon);
+export const MemoCustomerServiceIcon = memo(CustomerServiceIcon);
+export const MemoCheckIcon2 = memo(CheckIcon2);
+export const MemoInActiveHomeIcon = memo(InActiveHomeIcon);
+export const MemoInfoIcon = memo(InfoIcon);
+export const MemoEditIcon = memo(EditIcon);
+export const MemoRepeatIcon = memo(RepeatIcon);
+export const MemoCloseIcon = memo(CloseIcon);
+export const MemoRefrenceIcon = memo(RefrenceIcon);
+export const MemoCallIcon = memo(CallIcon);
+export const MemoCalednarIocn = memo(CalednarIocn);
+export const MemoMailIcon = memo(MailIcon);
+export const MemoCancelIcon = memo(CancelIcon);
+export const MemoIPAdressIcon = memo(IPAdressIcon);
+export const MemoQrCode = memo(QrCode);
+export const MemoQRIcon = memo(QRIcon);
+export const MemoLockIcon = memo(LockIcon);
+export const MemoCheckIcon3 = memo(CheckIcon3);
+export const MemoRemoveIcon = memo(RemoveIcon);
+export const MemoFanIcon = memo(FanIcon);
+export const MemoSettings2Icon = memo(Settings2Icon);
+
 export {
-  Logo,
-  HomeIcon,
-  SettingsIcon,
-  LampIcon,
-  GridIcon,
-  DoorIcon,
-  CleaningIcon,
-  CheckIcon,
-  CustomerServiceIcon,
-  CheckIcon2,
-  InActiveHomeIcon,
-  InfoIcon,
-  EditIcon,
-  RepeatIcon,
-  CloseIcon,
-  RefrenceIcon,
-  CallIcon,
-  CalednarIocn,
-  MailIcon,
-  CancelIcon,
-  IPAdressIcon,
-  QrCode,
-  QRIcon,
-  LockIcon,
-  CheckIcon3,
-  RemoveIcon,
-  FanIcon,
-  Settings2Icon,
+  MemoLogo as Logo,
+  MemoHomeIcon as HomeIcon,
+  MemoSettingsIcon as SettingsIcon,
+  MemoLampIcon as LampIcon,
+  MemoGridIcon as GridIcon,
+  MemoDoorIcon as DoorIcon,
+  MemoCleaningIcon as CleaningIcon,
+  MemoCheckIcon as CheckIcon,
+  MemoCustomerServiceIcon as CustomerServiceIcon,
+  MemoCheckIcon2 as CheckIcon2,
+  MemoInActiveHomeIcon as InActiveHomeIcon,
+  MemoInfoIcon as InfoIcon,
+  MemoEditIcon as EditIcon,
+  MemoRepeatIcon as RepeatIcon,
+  MemoCloseIcon as CloseIcon,
+  MemoRefrenceIcon as RefrenceIcon,
+  MemoCallIcon as CallIcon,
+  MemoCalednarIocn as CalednarIocn,
+  MemoMailIcon as MailIcon,
+  MemoCancelIcon as CancelIcon,
+  MemoIPAdressIcon as IPAdressIcon,
+  MemoQrCode as QrCode,
+  MemoQRIcon as QRIcon,
+  MemoLockIcon as LockIcon,
+  MemoCheckIcon3 as CheckIcon3,
+  MemoRemoveIcon as RemoveIcon,
+  MemoFanIcon as FanIcon,
+  MemoSettings2Icon as Settings2Icon,
 };

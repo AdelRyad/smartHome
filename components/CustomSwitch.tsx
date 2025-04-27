@@ -1,5 +1,5 @@
 import React, {useRef, useEffect, memo, useMemo, useCallback} from 'react';
-import {TouchableOpacity, Animated, StyleSheet} from 'react-native';
+import {Pressable, Animated, StyleSheet} from 'react-native';
 import {COLORS} from '../constants/colors';
 
 const CustomSwitch = memo(
@@ -71,11 +71,13 @@ const CustomSwitch = memo(
     const containerOpacity = disabled ? 0.6 : 1;
 
     return (
-      <TouchableOpacity
+      <Pressable
         onPress={handlePress}
-        activeOpacity={disabled ? 1 : 0.7}
         disabled={disabled}
-        style={{opacity: containerOpacity}}>
+        style={({pressed}) => [
+          {opacity: containerOpacity},
+          pressed && !disabled ? {opacity: 0.7} : null,
+        ]}>
         <Animated.View
           style={[
             styles.switchContainer,
@@ -118,7 +120,7 @@ const CustomSwitch = memo(
             ]}
           />
         </Animated.View>
-      </TouchableOpacity>
+      </Pressable>
     );
   },
 );

@@ -1,5 +1,5 @@
 import React from 'react';
-import {Modal, View, Text, TouchableOpacity, StyleSheet} from 'react-native';
+import {Modal, View, Text, Pressable, StyleSheet} from 'react-native';
 import {CloseIcon} from '../icons';
 import {COLORS} from '../constants/colors';
 
@@ -34,23 +34,37 @@ const PopupModal = ({
               </View>
               <Text style={styles.title}>{title}</Text>
             </View>
-            <TouchableOpacity style={styles.closeButton} onPress={onClose}>
+            <Pressable
+              style={({pressed}) => [
+                styles.closeButton,
+                pressed && {opacity: 0.7},
+              ]}
+              onPress={onClose}>
               <CloseIcon fill={'black'} width={24} height={24} />
-            </TouchableOpacity>
+            </Pressable>
           </View>
           <View style={styles.content}>{children}</View>
           {hideAcitons ? null : (
             <View style={styles.footer}>
-              <TouchableOpacity onPress={onClose} style={styles.button}>
+              <Pressable
+                onPress={onClose}
+                style={({pressed}) => [
+                  styles.button,
+                  pressed && {opacity: 0.7},
+                ]}>
                 <Text style={styles.buttonText}>Close</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
+              </Pressable>
+              <Pressable
                 onPress={onConfirm}
-                style={[styles.button, styles.confirmButton]}>
+                style={({pressed}) => [
+                  styles.button,
+                  styles.confirmButton,
+                  pressed && {opacity: 0.7},
+                ]}>
                 <Text style={[styles.buttonText, styles.confirmButtonText]}>
                   Confirm
                 </Text>
-              </TouchableOpacity>
+              </Pressable>
             </View>
           )}
         </View>

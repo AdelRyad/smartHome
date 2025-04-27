@@ -1,7 +1,7 @@
 import React, {memo, useMemo} from 'react';
 import {
   View,
-  TouchableOpacity,
+  Pressable,
   Text,
   ViewStyle,
   StyleSheet,
@@ -104,8 +104,11 @@ const SectionCard = memo(
 
     return (
       <View style={styles.gridItemContainer}>
-        <TouchableOpacity
-          style={sectionCard(status, connected)}
+        <Pressable
+          style={({pressed}) => [
+            sectionCard(status, connected),
+            pressed && {opacity: 0.7},
+          ]}
           onPress={() => canNavigate && onNavigate(item)}
           disabled={!canNavigate}>
           <View style={styles.sectionHeader}>
@@ -139,15 +142,15 @@ const SectionCard = memo(
                 disabled={!connected || loading}
               />
             ) : (
-              <TouchableOpacity
+              <Pressable
                 style={styles.reconnectButton}
                 onPress={handleReconnect}>
                 <Text style={styles.reconnectButtonText}>Reconnect</Text>
-              </TouchableOpacity>
+              </Pressable>
             )}
           </View>
           {/* Only show reconnect button if connection error exists AND section has an IP */}
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   },

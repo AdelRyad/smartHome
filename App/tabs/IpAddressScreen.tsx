@@ -18,10 +18,15 @@ import {
   EditIcon,
   IPAdressIcon,
 } from '../../icons';
-import {useWindowDimensions} from 'react-native';
 import CustomTabBar from '../../components/CustomTabBar';
 import PopupModal from '../../components/PopupModal';
 import {getSectionsWithStatus, updateSection} from '../../utils/db';
+import modbusConnectionManager from '../../utils/modbusConnectionManager';
+import useWorkingHoursStore from '../../utils/workingHoursStore';
+import useCleaningHoursStore from '../../utils/cleaningHoursStore';
+import useDpsPressureStore from '../../utils/dpsPressureStore';
+import usePressureButtonStore from '../../utils/pressureButtonStore';
+import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 
 interface Section {
   id: number;
@@ -96,9 +101,6 @@ const ModalItem = memo(
 );
 
 const IpAddressScreen = () => {
-  const {width, height} = useWindowDimensions();
-  const isPortrait = height > width;
-
   const [edit, setEdit] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [focusedInputId, setFocusedInputId] = useState<number | null>(null);
@@ -120,6 +122,14 @@ const IpAddressScreen = () => {
       });
     };
     fetchData();
+    return () => {
+      useWorkingHoursStore.getState().cleanup();
+      useCleaningHoursStore.getState().cleanup();
+      useDpsPressureStore.getState().cleanup();
+      usePressureButtonStore.getState().cleanup();
+      useSectionsPowerStatusStore.getState().cleanup();
+      modbusConnectionManager.closeAll();
+    };
   }, []);
 
   // Handle field changes with useCallback
@@ -220,6 +230,8 @@ const IpAddressScreen = () => {
     [handleRemoveEdit],
   );
 
+  const keyExtractor = useCallback((item: Section) => item.id.toString(), []);
+
   return (
     <Layout>
       <PopupModal
@@ -237,8 +249,8 @@ const IpAddressScreen = () => {
           contentContainerStyle={styles.modalContentContainer}
           renderItem={renderModalItem}
           keyExtractor={item => item.id.toString()}
-          columnWrapperStyle={isPortrait ? null : styles.modalColumnWrapper}
-          numColumns={isPortrait ? 1 : 3}
+          columnWrapperStyle={styles.gridColumnWrapper}
+          numColumns={3}
           initialNumToRender={5}
           maxToRenderPerBatch={5}
           windowSize={5}
@@ -253,22 +265,13 @@ const IpAddressScreen = () => {
       <View style={styles.container}>
         <View style={styles.gridContainer}>
           <FlatList
-            key={isPortrait ? 'portrait' : 'landscape'}
-            numColumns={isPortrait ? 2 : 4}
             data={sections}
             renderItem={renderGridItem}
-            keyExtractor={item => item.id.toString()}
-            columnWrapperStyle={
-              isPortrait
-                ? styles.gridColumnWrapperPortrait
-                : styles.gridColumnWrapper
-            }
+            keyExtractor={keyExtractor}
+            numColumns={4}
+            columnWrapperStyle={styles.gridColumnWrapper}
             contentContainerStyle={styles.gridContentContainer}
             showsVerticalScrollIndicator={false}
-            initialNumToRender={8}
-            maxToRenderPerBatch={8}
-            windowSize={5}
-            extraData={{edit, focusedInputId}}
           />
         </View>
       </View>
@@ -343,9 +346,6 @@ const styles = StyleSheet.create({
   gridColumnWrapper: {
     gap: 16,
     justifyContent: 'space-between',
-  },
-  gridColumnWrapperPortrait: {
-    gap: 16,
   },
   card: {
     flexDirection: 'row',
@@ -490,9 +490,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.error[50],
     borderWidth: 1,
     borderColor: COLORS.error[100],
-  },
-  modalColumnWrapper: {
-    gap: 16,
   },
 });
 

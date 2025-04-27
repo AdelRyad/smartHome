@@ -1,5 +1,5 @@
 import React, {memo} from 'react';
-import {View, TouchableOpacity, Text} from 'react-native';
+import {View, Pressable, Text} from 'react-native';
 import {COLORS} from '../constants/colors';
 import {CheckIcon} from '../icons';
 
@@ -19,8 +19,8 @@ const HeaderStatusIcon = memo(
   }) => (
     <View style={styles.iconWrapper}>
       <View ref={iconRef} style={styles.statusIconContainer}>
-        <TouchableOpacity
-          style={styles.iconButton}
+        <Pressable
+          style={({pressed}) => [styles.iconButton, pressed && {opacity: 0.7}]}
           onPress={() => onPress(index, item.title)}>
           <View
             style={[
@@ -62,7 +62,7 @@ const HeaderStatusIcon = memo(
                 : ''
             }
           />
-        </TouchableOpacity>
+        </Pressable>
       </View>
     </View>
   ),

@@ -1,5 +1,5 @@
 import React, {memo, useMemo, useCallback} from 'react';
-import {TouchableOpacity, View, Text, StyleSheet} from 'react-native';
+import {Pressable, View, Text, StyleSheet} from 'react-native';
 import {COLORS} from '../constants/colors';
 import {LampIcon, CheckIcon3} from '../icons';
 
@@ -20,6 +20,33 @@ interface GridItemProps {
   onSelectDevice: (item: {id: number; name: string}) => void;
   onLongPress: (item: {id: number; name: string}) => void;
 }
+
+interface ProgressBarProps {
+  height: number;
+  color: string;
+  style?: any;
+}
+
+const ProgressBar = React.memo(({height, color, style}: ProgressBarProps) => (
+  <View
+    style={[
+      styles.progressBar,
+      {height: `${height}%`, backgroundColor: color},
+      style,
+    ]}
+  />
+));
+
+interface CheckboxProps {
+  selected: boolean;
+  style?: any;
+}
+
+const Checkbox = React.memo(({selected, style}: CheckboxProps) => (
+  <View style={[styles.checkbox, selected && styles.selectedCheckbox, style]}>
+    {selected && <CheckIcon3 />}
+  </View>
+));
 
 const GridItem = memo(
   ({
@@ -84,22 +111,18 @@ const GridItem = memo(
       styleArr.push({opacity: 0.5});
     }
     return (
-      <TouchableOpacity
+      <Pressable
         onLongPress={handleLongPress}
         onPress={handleSelect}
         disabled={!isLampActive}
-        style={styleArr}>
+        style={({pressed}) =>
+          [...styleArr, pressed && {opacity: 0.7}].filter(Boolean)
+        }>
         <View style={styles.card}>
           <View style={styles.cardContent}>
             <View style={styles.gridItemHeader}>
               {editLifeHours && isLampActive ? (
-                <View
-                  style={[
-                    styles.checkbox,
-                    isSelected && styles.selectedCheckbox,
-                  ]}>
-                  {isSelected && <CheckIcon3 />}
-                </View>
+                <Checkbox selected={isSelected} />
               ) : (
                 <View style={styles.iconContainer}>
                   <LampIcon
@@ -124,19 +147,14 @@ const GridItem = memo(
           </View>
           <View style={styles.progressBarContainer}>
             {isLampActive && (
-              <View
-                style={[
-                  styles.progressBar,
-                  {
-                    height: `${progressBarHeight}%`,
-                    backgroundColor: progressBarColor,
-                  },
-                ]}
+              <ProgressBar
+                height={progressBarHeight}
+                color={progressBarColor}
               />
             )}
           </View>
         </View>
-      </TouchableOpacity>
+      </Pressable>
     );
   },
 );

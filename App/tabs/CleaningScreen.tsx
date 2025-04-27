@@ -1,4 +1,4 @@
-import React, {useState, useEffect, useCallback} from 'react';
+import React, {useState, useEffect, useCallback, memo} from 'react';
 import {
   View,
   Text,
@@ -27,6 +27,12 @@ import {
   setCleaningHoursSetpoint,
 } from '../../utils/modbus';
 import {useCurrentSectionStore} from '../../utils/useCurrentSectionStore';
+import modbusConnectionManager from '../../utils/modbusConnectionManager';
+import useWorkingHoursStore from '../../utils/workingHoursStore';
+import useCleaningHoursStore from '../../utils/cleaningHoursStore';
+import useDpsPressureStore from '../../utils/dpsPressureStore';
+import usePressureButtonStore from '../../utils/pressureButtonStore';
+import useSectionsPowerStatusStore from '../../utils/sectionsPowerStatusStore';
 
 interface SectionSummary {
   id: number;
@@ -88,6 +94,12 @@ const CleaningScreen = () => {
     });
     return () => {
       isMounted = false;
+      useWorkingHoursStore.getState().cleanup();
+      useCleaningHoursStore.getState().cleanup();
+      useDpsPressureStore.getState().cleanup();
+      usePressureButtonStore.getState().cleanup();
+      useSectionsPowerStatusStore.getState().cleanup();
+      modbusConnectionManager.closeAll();
     };
   }, [logStatus, selectedSection]);
 
@@ -186,39 +198,51 @@ const CleaningScreen = () => {
     }
   };
 
-  const renderScrollItem = ({item}: {item: SectionSummary}) => (
-    <TouchableOpacity
-      onPress={() => {
-        if (item.id !== selectedSection?.id && !isSaving) {
-          setSelectedSection(item);
-          setEdit(false);
-          setCurrentSectionId(item.id);
-        }
-      }}
-      style={[
-        styles.scrollItem,
-        {
-          borderLeftColor:
-            item.id === selectedSection?.id
-              ? COLORS.teal[500]
-              : COLORS.gray[200],
-          opacity: isSaving ? 0.6 : 1,
-        },
-      ]}
-      disabled={loading || isSaving}>
-      <Text
+  const keyExtractor = useCallback((item: any) => item.id.toString(), []);
+
+  const renderItem = useCallback(
+    ({item}: {item: any}) => (
+      <TouchableOpacity
+        onPress={() => {
+          if (item.id !== selectedSection?.id && !isSaving) {
+            setSelectedSection(item);
+            setEdit(false);
+            setCurrentSectionId(item.id);
+          }
+        }}
         style={[
-          styles.scrollItemText,
+          styles.scrollItem,
           {
-            color:
+            borderLeftColor:
               item.id === selectedSection?.id
                 ? COLORS.teal[500]
-                : COLORS.gray[800],
+                : COLORS.gray[200],
+            opacity: isSaving ? 0.6 : 1,
           },
-        ]}>
-        {item.name}
-      </Text>
-    </TouchableOpacity>
+        ]}
+        disabled={loading || isSaving}>
+        <Text
+          style={[
+            styles.scrollItemText,
+            {
+              color:
+                item.id === selectedSection?.id
+                  ? COLORS.teal[500]
+                  : COLORS.gray[800],
+            },
+          ]}>
+          {item.name}
+        </Text>
+      </TouchableOpacity>
+    ),
+    [
+      selectedSection,
+      isSaving,
+      loading,
+      setSelectedSection,
+      setEdit,
+      setCurrentSectionId,
+    ],
   );
 
   return (
@@ -279,8 +303,8 @@ const CleaningScreen = () => {
             {sections.length > 0 ? (
               <FlatList
                 data={sections}
-                renderItem={renderScrollItem}
-                keyExtractor={item => item.id.toString()}
+                renderItem={renderItem}
+                keyExtractor={keyExtractor}
                 showsVerticalScrollIndicator={false}
                 extraData={`${selectedSection?.id}-${isSaving}`}
               />
@@ -632,4 +656,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default CleaningScreen;
+export default memo(CleaningScreen);
